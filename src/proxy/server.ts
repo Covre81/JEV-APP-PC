@@ -1,0 +1,137 @@
+import { timingSafeEqual } from 'node:crypto';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import type { Dispatcher } from 'undici';
+import type { Config } from '../config.js';
+import type { Route } from '../domain/policy.js';
+import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
+import { parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
+import type { RouteDecision, Router } from '../routing/router.js';
+import { forwardableHeaders, presentedCredential, single } from './headers.js';
+
+export interface ServerDeps {
+  readonly config: Config;
+  readonly router: Router;
+  readonly providers: Readonly<Record<Route, Provider>>;
+}
+
+/** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
+const PRIMARY_RATE_LIMITED = new Set([429, 529]);
+
+function anthropicError(type: string, message: string) {
+  return { type: 'error', error: { type, message } };
+}
+
+function sameSecret(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+export function buildServer({ config, router, providers }: ServerDeps): FastifyInstance {
+  const app = Fastify({
+    logger: { level: config.logLevel },
+    bodyLimit: config.bodyLimitBytes,
+    exposeHeadRoutes: false,
+  });
+
+  // Keep every body as raw bytes: primary-bound requests are forwarded byte-for-byte.
+  app.removeAllContentTypeParsers();
+  app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+
+  const proxyToken = config.primary.authMode === 'inject' ? config.proxyAuthToken : undefined;
+  if (proxyToken) {
+    app.addHook('onRequest', async (req, reply) => {
+      if (req.url === '/healthz') return;
+      const presented = presentedCredential(req.headers);
+      if (!presented || !sameSecret(presented, proxyToken)) {
+        return reply.code(401).send(anthropicError('authentication_error', 'invalid proxy token'));
+      }
+    });
+  }
+
+  app.get('/healthz', async () => ({ ok: true }));
+  app.post('/v1/messages', handleMessages);
+  // count_tokens, /v1/models, HEAD /api/hello, … are Anthropic concerns: pass through.
+  app.all('*', async (req, reply) => relay(reply, await providers.primary.send(providerRequest(req, reply))));
+
+  async function handleMessages(req: FastifyRequest, reply: FastifyReply) {
+    const base = providerRequest(req, reply);
+    // Unparseable → let Anthropic return its canonical validation error.
+    if (!base.body || !base.rawBody) return relay(reply, await providers.primary.send(base));
+
+    const decision = await router.decide({
+      body: base.body,
+      rawByteLength: base.rawBody.length,
+      sessionId: single(req.headers, 'x-claude-code-session-id'),
+      agentId: single(req.headers, 'x-claude-code-agent-id'),
+      requestClass: single(req.headers, 'x-claude-code-request-class'),
+      contextCompacted: single(req.headers, 'x-claude-code-context-compacted') !== undefined,
+    });
+
+    if (decision.route === 'cheap') {
+      const cheap = await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      if (cheap.kind === 'response') return relay(reply, cheap, decision, req);
+
+      router.pinToPrimary(decision);
+      const failover: RouteDecision = { ...decision, route: 'primary', reason: 'failover:cheap-unavailable' };
+      req.log.warn({ reason: cheap.reason, conversation: decision.conversationKey }, 'cheap provider unavailable');
+      return relay(reply, await providers.primary.send(base), failover, req);
+    }
+
+    const primary = await providers.primary.send(base);
+    if (
+      primary.kind === 'unavailable' ||
+      !config.router.failoverOnPrimaryRateLimit ||
+      !PRIMARY_RATE_LIMITED.has(primary.status)
+    ) {
+      return relay(reply, primary, decision, req);
+    }
+
+    // Quota failover: hold the (small) error body so it can still be relayed
+    // verbatim if the cheap provider cannot take the request either.
+    const errorBody = Buffer.concat(await primary.body.toArray());
+    const cheap = await providers.cheap.send(base);
+    if (cheap.kind === 'response') {
+      return relay(reply, cheap, { ...decision, route: 'cheap', reason: 'failover:primary-rate-limited' }, req);
+    }
+    reply.code(primary.status).headers(primary.headers);
+    return reply.send(errorBody);
+  }
+
+  function providerRequest(req: FastifyRequest, reply: FastifyReply): ProviderRequest {
+    const controller = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableFinished) controller.abort();
+    });
+    const rawBody = Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
+    const body: MessagesBody | undefined = rawBody && req.url.startsWith('/v1/messages') ? parseMessagesBody(rawBody) : undefined;
+    return {
+      method: req.method as Dispatcher.HttpMethod,
+      url: req.url,
+      headers: forwardableHeaders(req.headers),
+      rawBody,
+      body,
+      signal: controller.signal,
+    };
+  }
+
+  function relay(reply: FastifyReply, result: ProviderResult, decision?: RouteDecision, req?: FastifyRequest) {
+    if (result.kind === 'unavailable') {
+      return reply.code(502).send(anthropicError('api_error', `jev-router: ${result.reason}`));
+    }
+    if (decision) {
+      req?.log.info({ route: decision }, 'route decision');
+      reply.header('x-jev-route', `${decision.route}; reason=${decision.reason}`);
+    }
+    reply.code(result.status).headers(result.headers);
+    return reply.send(result.body);
+  }
+
+  app.setErrorHandler((err, req, reply) => {
+    if (reply.raw.destroyed) return; // client went away mid-request
+    req.log.error({ err }, 'request failed');
+    return reply.code(502).send(anthropicError('api_error', 'jev-router: upstream unreachable'));
+  });
+
+  return app;
+}
