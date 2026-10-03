@@ -1,183 +1,221 @@
 # jev-router
 
-A local, Anthropic-compatible gateway that sits between Claude Code (or any
-Messages-API client) and `api.anthropic.com`. It uses **TypeSafe JEV** as a
-System One classifier to route each conversation to the cheapest Claude model
-that is likely to be sufficient.
+A local, Anthropic-compatible gateway for Claude Code (or any Messages-API
+client) that uses **TypeSafe JEV** as a System One classifier to keep simple
+work off your Claude quota.
+
+- **Simple work** goes to a cheap OpenAI-compatible provider, such as Groq or
+  OpenRouter.
+- **Structural work** goes to Anthropic.
 
 ```
-Claude Code ──ANTHROPIC_BASE_URL──▶ jev-router :8787 ──▶ api.anthropic.com
-                                       │
-                                       └─(new human turn only)─▶ JEV /v1/systemone
+                                      ┌─ simple ───▶ Groq / OpenRouter  (/chat/completions, translated)
+Claude Code ──▶ jev-router :8787 ──┤
+                    │                 └─ structural ─▶ Anthropic          (/v1/messages, byte-for-byte)
+                    └─ new human turn ─▶ JEV /v1/systemone
 ```
 
-## 1. Architecture
+## Routing model (ADR) — the adopted design
 
-**Gateway / Router pattern.** The proxy speaks the Anthropic Messages format on
-both sides. Claude Code believes it talks to Anthropic; Anthropic sees an
-ordinary client. The proxy's only job is to decide the `model` field — and to
-otherwise stay out of the way.
+**Status:** adopted. It replaces the earlier Haiku → Sonnet → Opus ladder.
 
-**System One vs System Two.**
+**Context.** On a Claude subscription, routing *between Claude models* cuts no
+bill. Every model draws from the same quota. On top of that, switching models
+mid-conversation discards the model-scoped prompt cache. Moving between Claude
+models only moves the cost around. The goal is to **spend the Claude quota
+only on work that needs Claude**.
 
-| | System One (JEV) | System Two (Claude) |
-|---|---|---|
-| Job | *Which model is enough?* | Do the work |
-| Output | Calibrated probabilities over typed answers | Text, tool calls, reasoning |
-| Latency / cost | < 0.5 s, ~$0.042 / M input tokens | Seconds to minutes, $1–$10 / M input |
+**Decision.** Use two providers with different billing:
 
-JEV is asked **one ordinal `score` question** whose three levels are the tiers
-(haiku / sonnet / opus). The returned level distribution `p0, p1, p2` becomes
-cumulative *sufficiency* scores:
+| Route | Provider | Billing | Gets |
+|---|---|---|---|
+| `cheap` | Any OpenAI-compatible API (default: Groq `openai/gpt-oss-20b`) | Per token, separate account | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
+| `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Also level 2 by default, plus everything the cheap route can't carry |
 
-```
-haiku  = p0            # P(a haiku-level model is enough)
-sonnet = p0 + p1
-opus   = 1
-```
+**Rules.**
 
-e.g. `{ "haiku": 80, "sonnet": 95, "opus": 100 }`. A pure function
-(`src/domain/policy.ts`) then picks the **cheapest tier whose score ≥
-`ROUTER_THRESHOLD`**, otherwise the ceiling (fail-up). No randomness, no I/O.
+1. **System One decides the route.** JEV answers one ordinal `score`
+   question, and the router gets the probability distribution
+   `{simple, standard, structural}`.
+2. **The cheap route needs confidence, not just a majority.** A task goes
+   cheap only when `P(simple) ≥ ROUTER_MIN_CHEAP_PROBABILITY` (default 0.8).
+   It does not use the most likely level: `{.45, .30, .25}` has "simple" as
+   its top level, but a 55% chance the cheap model is out of its depth.
+   Level 2 stays primary unless `ROUTER_STANDARD_ROUTE=cheap`.
+3. **The route sticks for the whole conversation.**
+   - Tool-result turns of the agent loop reuse the route without calling JEV.
+   - A new human turn on the cheap route is re-classified and may escalate.
+   - Primary is terminal: going back down would throw away the Anthropic
+     cache, and the next escalation would pay to rebuild it.
+4. **Failure only ever moves work up to Anthropic.**
+   - The request can't be translated (images, documents, server tools): primary.
+   - The request is larger than the cheap model's context budget: primary.
+   - The cheap provider returns an error or times out: primary, and the
+     conversation is pinned there.
+   - The cheap provider breaks mid-stream: an Anthropic `error` event is sent,
+     the conversation is pinned to primary, and Claude Code retries.
+   - JEV fails or times out: primary.
+5. **Quota failover in the other direction is opt-in**
+   (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`). When Anthropic answers 429 or 529,
+   the request is retried on the cheap provider. It's off by default because
+   it silently hands structural work to a 20B model. Turn it on only if you
+   prefer a degraded answer to waiting.
+6. **Some Claude Code traffic always stays primary**
+   (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
+   `auxiliary` class includes the auto-mode safety classifier, and compaction
+   summaries need the strong model.
 
-### Why the router is session-sticky, not per-request
+**Consequences.**
 
-This is the decision that makes or breaks the idea, so it is explicit:
+- **Your code goes to a third party.** The cheap provider sees the full prompt
+  and the file contents the agent reads. Check its data policy before pointing
+  a client repository at it.
+- **This setup is unsupported by Anthropic.** Claude Code is built for Claude
+  models. Anthropic's gateway docs state that it doesn't support routing Claude
+  Code to non-Claude models. On the cheap route, adaptive thinking, prompt
+  caching and server tools (web search, tool search) are gone.
+- **Claude Code's agent loop is demanding.** The cheap model has to drive it
+  with 20+ tools and a system prompt of tens of thousands of tokens. A 20B
+  model does fine on the narrow level-1 band and fails outside it. Hence the
+  0.8 bar and level 2 on primary.
+- **Rate limits on cheap tiers.** One Claude Code request is roughly 20–40K
+  input tokens. Free and dev tiers on cheap providers often have per-minute
+  token caps below that. Each rejection fails over to Claude, so you spend the
+  very quota you meant to save. Check your tier's limits.
+- **Claude Code shows the wrong model name on the cheap route.** It keeps
+  showing the model you picked. The truth is in the `x-jev-route` response
+  header and the `route decision` log line.
 
-- **Prompt caches are model-scoped.** Claude Code resends the whole history on
-  every agent-loop step. Switching model mid-conversation re-bills that
-  history as uncached input — usually more than the cheaper model saves.
-- **Thinking blocks are bound to the model and conversation.** A switch drops
-  the reasoning the previous model produced.
-- **Rewriting `system` / `tools` / `messages` breaks caching and the
-  preserved-thinking check upstream.** The proxy never touches them.
-
-So the rules are:
-
-| Situation | Behaviour |
-|---|---|
-| Fresh conversation (1 message) or just compacted | Classify, route |
-| Tool-result continuation (agent loop) | Reuse the conversation's tier, **no JEV call** |
-| New human turn in an ongoing conversation | Classify; **escalate only**, never de-escalate |
-| Conversation outgrows the tier's context window | Bump to the cheapest tier that fits |
-| Client asked for model X | X's tier is a hard **ceiling**; same tier ⇒ X is kept verbatim (Fable stays Fable) |
-| `auxiliary` / `compaction` requests | Pass through |
-| JEV error / timeout | Fail open: keep the tier, else the requested model |
-| Routed model returns 400/404/422 | Replay the **original bytes** on the requested model, pin the conversation there |
-
-Conversation identity comes from Claude Code's `x-claude-code-session-id` +
-`x-claude-code-agent-id` headers (so each subagent is routed independently),
-falling back to a hash of the first message for generic clients.
-
-## 2. Repository structure
+## Repository structure
 
 ```
 src/
-├── index.ts                      # composition root — the only file that knows concrete classes
-├── config.ts                     # zod-validated env → typed Config; fails fast at boot
-├── domain/                       # pure, no I/O
-│   ├── tiers.ts                  # Tier, ordering, TierScores contract
-│   ├── policy.ts                 # selectTier(): deterministic decision
-│   └── model-catalog.ts          # per-model capabilities (context, max output, thinking, effort)
-├── classifier/                   # System One port + adapters
-│   ├── classifier.ts             # ComplexityClassifier interface
-│   ├── jev-classifier.ts         # TypeSafe /v1/systemone adapter
-│   └── heuristic-classifier.ts   # offline mock for dev/tests
-├── routing/
-│   ├── messages-body.ts          # minimal open-schema parsing of the Messages body
-│   ├── router.ts                 # stickiness, escalation, ceiling, fail-open
-│   ├── request-adapter.ts        # strip fields the cheaper model rejects
-│   └── session-store.ts          # TTL + LRU map (20 lines, no dependency)
+├── index.ts                       # composition root (only file that knows concrete classes)
+├── config.ts                      # zod-validated env → typed Config; fails fast at boot
+├── domain/                        # pure, no I/O
+│   ├── complexity.ts              # ComplexityDistribution (JEV levels 1/2/3)
+│   └── policy.ts                  # selectRoute(), stickyRoute(): deterministic decisions
+├── classifier/                    # System One port + adapters
+│   ├── classifier.ts              # ComplexityClassifier interface
+│   ├── jev-classifier.ts          # TypeSafe /v1/systemone adapter
+│   └── heuristic-classifier.ts    # offline mock for dev/tests
+├── routing/                       # decides; never talks to a provider
+│   ├── messages-body.ts           # open-schema parsing of the Anthropic body
+│   ├── router.ts                  # stickiness, escalation, context budget, fail-to-primary
+│   └── session-store.ts           # TTL + LRU map
+├── providers/                     # executes; every provider answers in Anthropic format
+│   ├── provider.ts                # Provider port: response | unavailable
+│   ├── anthropic.ts               # byte-level forwarder (primary)
+│   └── openai/
+│       ├── provider.ts            # OpenAI-compatible provider (cheap)
+│       ├── translate-request.ts   # Anthropic Messages → Chat Completions
+│       ├── translate-response.ts  # Chat Completions JSON/SSE → Anthropic Messages
+│       └── sse.ts                 # SSE reader/writer
 └── proxy/
-    ├── server.ts                 # Fastify routes, replay-on-reject
-    ├── upstream.ts               # undici byte-level forwarder (streams, no decompression)
-    └── headers.ts                # hop-by-hop filtering, credential extraction
-test/                             # node:test — unit + e2e against fake upstreams
+    ├── server.ts                  # Fastify routes, failover in both directions
+    └── headers.ts                 # hop-by-hop filtering, credential extraction
 ```
 
-Dependencies point inward: `proxy → routing → domain`, `routing → classifier
-(interface)`. Swapping JEV for another System One model is one new file plus
-one line in `index.ts`.
+The router returns a decision (`cheap` | `primary`) and knows nothing about
+base URLs, headers or wire formats. Providers own all three. That split is
+deliberate: adding a provider, or changing how Groq is called, never touches
+routing rules, and routing rules are tested without HTTP.
 
-## 3. Dependencies
+### Translation: shallow, but never lossy
 
-| Package | Why | Not chosen |
-|---|---|---|
-| `fastify` | Raw-buffer body parsing with a hard `bodyLimit`, stream replies, pino logging built in | Express: slower, no built-in structured logging |
-| `undici` | `request()` returns the raw, *not decompressed* body stream — exactly what a transparent proxy must relay | `axios`/`node-fetch`: buffer or auto-decompress; global `fetch` decompresses and would desync `content-encoding` |
-| `zod` | Validate env and the few body fields read, with `looseObject` so unknown fields survive | Hand-rolled guards |
+The translator maps exactly what has a 1:1 equivalent, in both directions.
 
-Dev: `typescript`, `tsx`, `@types/node`. Tests use `node:test`.
-**Not needed:** `dotenv` (Node ≥ 20.6 has `--env-file`), an LRU library, and
-the Anthropic SDK — the SDK builds new requests from typed params, while a
-gateway must forward unknown beta headers and body fields untouched
-([Claude Code gateway contract](https://code.claude.com/docs/en/llm-gateway-protocol)).
+**Request: Anthropic → OpenAI.**
 
-## 4. Implementation highlights
+| Anthropic | OpenAI |
+|---|---|
+| `system` | `system` message |
+| text | text |
+| `tool_use` | `tool_calls` |
+| `tool_result` | `role: tool` messages, placed right after the call |
+| `tools[].input_schema` | `functions[].parameters` |
+| `tool_choice` | `tool_choice` |
+| `stop_sequences` | `stop` |
 
-**Proxy** (`src/proxy/server.ts`): every body is kept as a `Buffer`. If the
-router keeps the requested model, the original bytes go upstream unchanged.
-Only when the model changes is the body re-serialized, with `system`,
-`tools` and `messages` untouched. Responses are piped as streams, so SSE events
-and keep-alive pings reach Claude Code as they arrive. Unknown paths
-(`/v1/models`, `HEAD /api/hello`, …) are passed through.
+These are dropped on purpose:
 
-**JEV** (`src/classifier/jev-classifier.ts`):
+- `thinking` blocks: they are bound to the model that produced them.
+- `cache_control`.
+- Server tools and deferred tools: the cheap model never sees them.
 
-```jsonc
-// POST https://api.typesafe.ai/v1/systemone   Authorization: Bearer $TYPESAFE_API_KEY
-{
-  "model": "jev-latest",
-  "state": "Developer request to an AI coding agent:\n<prompt>\n\nContext: turn 1, 24 tools, ~31000 input tokens.",
-  "questions": {
-    "required_tier": {
-      "type": "score",
-      "instructions": "What is the least capable tier of AI coding assistant that will complete this request correctly on the first attempt?",
-      "criteria": ["Trivial or mechanical…", "Standard engineering…", "Hard reasoning…"]
-    }
-  }
-}
-// → answers.required_tier.probabilities = { "0": 0.8, "1": 0.15, "2": 0.05 }
-```
+Anything else throws `NotTranslatableError`, and the request goes to Anthropic.
+That covers images, documents, `tool_reference` and server tool results. The
+cheap model never sees a conversation with pieces silently missing.
 
-Only `probabilities` is consumed and it is zod-validated; anything else fails
-the classification, and the router fails open.
+**Response: OpenAI → Anthropic.** This direction is mandatory, because Claude
+Code only parses Anthropic events.
 
-**Request adapter** (`src/routing/request-adapter.ts`): when routing down to
-Haiku 4.5 it removes `thinking: {type: "adaptive"}` and `output_config.effort`,
-which Haiku 4.5 rejects, clamps `max_tokens` to 64K and drops `speed`. Without
-this, Claude Code's own recovery would turn thinking off for the rest of the
-conversation.
+- Text deltas stream live.
+- Tool calls are buffered and emitted as complete `tool_use` blocks. Buffering
+  guarantees a well-formed event sequence, and lets the proxy validate the
+  argument JSON *before* Claude Code can run the tool.
+- Tool call ids are sanitized to Anthropic's `^[a-zA-Z0-9_-]+$`, so a
+  conversation that later escalates replays cleanly on Claude.
 
-## 5. Setup
+## Dependencies
+
+| Package | Why |
+|---|---|
+| `fastify` | Raw-buffer bodies with a hard `bodyLimit`, streamed replies, pino logging |
+| `undici` | One HTTP client for all three upstreams. `request()` exposes the raw, non-decompressed stream that the Anthropic passthrough needs |
+| `zod` | Validates env, the body fields we read, and every JEV/OpenAI payload |
+
+Deliberately absent:
+
+- `dotenv`: Node's `--env-file` does the job.
+- The Anthropic SDK: a gateway forwards bytes, it doesn't build requests.
+- The OpenAI SDK: two endpoints and a stream translator don't justify it.
+- An LRU library.
+
+## Setup
 
 ```bash
 git clone https://github.com/covre81/jev-app-pc.git jev-router && cd jev-router
 npm ci
-cp .env.example .env          # set TYPESAFE_API_KEY (or CLASSIFIER=heuristic for offline dev)
-npm test                      # unit + e2e against fake upstreams, no network
-npm run build && npm start    # or: npm run dev
+cp .env.example .env
+#   TYPESAFE_API_KEY=...   (or CLASSIFIER=heuristic for offline dev)
+#   CHEAP_API_KEY=...      (Groq: gsk_..., OpenRouter: sk-or-...)
+npm test                   # 33 tests, fake upstreams, no network
+npm run build && npm start
 curl -s localhost:8787/healthz
 ```
 
-Requirements: Node ≥ 22.19.
+Requires Node ≥ 22.19.
 
-**Credentials:**
+**Cheap provider presets:**
 
-- **`passthrough`** (default): the proxy holds no Anthropic secret. Claude Code
-  sends its own API key or claude.ai login, and the proxy forwards it.
-- **`inject`**: set `ANTHROPIC_API_KEY` in `.env`. The proxy strips client
-  credentials and injects the key. If `HOST` is not loopback,
-  `PROXY_AUTH_TOKEN` is required, because otherwise the proxy is an open relay
-  to your bill.
+```bash
+# Groq (default)
+CHEAP_BASE_URL=https://api.groq.com/openai/v1
+CHEAP_MODEL=openai/gpt-oss-20b
 
-**OpenRouter:** not used. JEV's interface is TypeSafe's typed
-`/v1/systemone` endpoint, not chat completions. Pointing `JEV_API_URL` at
-another host only works if it serves that same contract.
+# OpenRouter
+CHEAP_BASE_URL=https://openrouter.ai/api/v1
+CHEAP_MODEL=<any tool-calling model id from openrouter.ai/models>
+```
 
-## 6. Claude Code integration
+On Groq, `llama-3.1-8b-instant` was deprecated for free and dev tiers on
+2026-08-16, with `openai/gpt-oss-20b` as the recommended replacement. That is
+why the default is not "Llama 3 8B".
 
-`~/.claude/settings.json` (or the project's `.claude/settings.json`):
+**Claude credentials:** see `UPSTREAM_AUTH_MODE` in `.env.example`.
+
+- `passthrough` (default): the proxy holds no Anthropic secret and forwards
+  whatever Claude Code sends, API key or claude.ai login.
+- `inject`: the proxy holds `ANTHROPIC_API_KEY` and replaces client
+  credentials. Off-loopback, `PROXY_AUTH_TOKEN` is required.
+
+The cheap provider's key never leaves the proxy, and Anthropic credentials
+are never sent to it.
+
+## Claude Code integration
+
+`~/.claude/settings.json`:
 
 ```json
 {
@@ -188,40 +226,21 @@ another host only works if it serves that same contract.
 }
 ```
 
-Or per shell: `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 claude`.
+- **`CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` is required for rule 6.** Without it,
+  Claude Code doesn't send `x-claude-code-request-class`, and its side
+  requests (titles, classifiers, summaries) get classified like any prompt.
+- **With a claude.ai login,** the primary route keeps using your
+  subscription. Only cheap-routed turns leave it.
+- **Other clients:** point the base URL at `http://127.0.0.1:8787`. Without
+  session headers, conversations are keyed by a hash of their first message.
 
-- `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` makes Claude Code send
-  `x-claude-code-request-class`, so titles, summaries and compaction are not
-  classified. It is off by default for custom base URLs.
-- In `inject` mode, also set `"ANTHROPIC_AUTH_TOKEN": "<PROXY_AUTH_TOKEN>"`.
-- **Billing reality:** with a claude.ai subscription login and no gateway
-  credential, requests still bill against the subscription. Routing then saves
-  usage-limit quota, not money. Per-token savings only exist on API-key billing.
-- The `/model` you pick is the **ceiling**. Pick Opus to let the router use
-  the full range, or Sonnet to cap spend.
-- Claude Code keeps displaying the requested model. The model actually used is
-  in the `x-jev-route` response header and in the `route decision` log line.
+## Before trusting it
 
-Other Messages-API clients: point their base URL at `http://127.0.0.1:8787`.
-Without session headers, conversations are keyed by a hash of their first message.
+The `route decision` log line carries the JEV distribution, the route and the
+reason for every turn. Use it to measure:
 
-## Limitations — read before trusting the savings
+- the share of turns that went cheap;
+- how many of those escalated on the next human turn (a misroute signal);
+- how often the cheap provider failed over.
 
-1. **The first-turn classification is a prior, not ground truth.** In agentic
-   coding, difficulty often shows up only after tool results come back. The
-   escalate-on-new-human-turn rule only partly covers this.
-2. **Measure before you believe it.** Anthropic's guidance is to compare a
-   cascade against the simpler alternative: the strongest model at lower
-   effort (`/effort low` on Opus). One model also means one cache namespace.
-   Use the `route decision` logs (`scores`, `tier`, `reason`) to build an eval
-   before you raise the threshold or drop it.
-3. **Session state is in memory.** After a restart, ongoing conversations are
-   treated as running on the requested model. This is safe, but you lose the
-   savings until the next fresh conversation.
-4. **`model-catalog.ts` is a static table** (as of 2026-09). New models fall
-   back to a permissive profile plus the replay-on-reject path. Update the table
-   when you add a model.
-5. **JEV's response schema is pinned to `answers.<id>.probabilities`.** That
-   shape matches TypeSafe's published score examples. If TypeSafe changes it,
-   zod rejects the response and the router fails open: you lose savings, not
-   correctness.
+Tune `ROUTER_MIN_CHEAP_PROBABILITY` from that data, not from intuition.
