@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Route } from './domain/policy.js';
+import { defaultTelemetryDbPath } from './paths.js';
 
 const bool = z.enum(['true', 'false']).transform((v) => v === 'true');
 const csv = z.string().transform((v) => new Set(v.split(',').map((s) => s.trim()).filter(Boolean)));
@@ -40,6 +41,9 @@ const Env = z
     FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(false),
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
     SESSION_MAX_ENTRIES: z.coerce.number().int().positive().default(10_000),
+
+    TELEMETRY_ENABLED: bool.default(true),
+    TELEMETRY_DB_PATH: z.string().min(1).optional(),
   })
   .superRefine((env, ctx) => {
     if (env.CLASSIFIER === 'jev' && !env.TYPESAFE_API_KEY) {
@@ -91,6 +95,8 @@ export type Config = Readonly<{
     sessionTtlMs: number;
     sessionMaxEntries: number;
   }>;
+  /** dbPath is undefined when telemetry is disabled. */
+  telemetry: Readonly<{ dbPath: string | undefined }>;
 }>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
@@ -142,5 +148,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       sessionTtlMs: e.SESSION_TTL_MS,
       sessionMaxEntries: e.SESSION_MAX_ENTRIES,
     },
+    telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
   };
 }

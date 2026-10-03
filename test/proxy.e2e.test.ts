@@ -13,6 +13,9 @@ import { OpenAICompatibleProvider } from '../src/providers/openai/provider.js';
 import { buildServer } from '../src/proxy/server.js';
 import { Router } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
+import { openTelemetryDb, type TelemetryDb } from '../src/telemetry/db.js';
+import { SqliteTelemetry } from '../src/telemetry/recorder.js';
+import { routerLogs, type RouterLog } from '../src/telemetry/schema.js';
 
 interface Seen {
   method: string;
@@ -40,8 +43,11 @@ async function fakeServer(handler: () => Handler, log: Seen[]): Promise<{ server
 const anthropicOk: Handler = async (seen, res) => {
   if (seen.method === 'HEAD') return void res.writeHead(200).end();
   res.writeHead(200, { 'content-type': 'text/event-stream', 'anthropic-ratelimit-unified-status': 'allowed' });
-  res.write(`event: message_start\ndata: {"type":"message_start","message":{"model":"${seen.body.model}"}}\n\n`);
+  res.write(
+    `event: message_start\ndata: {"type":"message_start","message":{"model":"${seen.body.model}","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":1}}}\n\n`,
+  );
   await sleep(50);
+  res.write(`event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":25}}\n\n`);
   res.end(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
 };
 
@@ -55,6 +61,7 @@ const openAiStream: Handler = async (_seen, res) => {
   res.write('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
   await sleep(200);
   res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+  res.write('data: {"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":5}}\n\n');
   res.end('data: [DONE]\n\n');
 };
 
@@ -71,6 +78,8 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
   let cheapLog: Seen[] = [];
   let anthropicHandler: Handler = anthropicOk;
   let cheapHandler: Handler = openAiStream;
+  let db: TelemetryDb;
+  let telemetry: SqliteTelemetry;
 
   before(async () => {
     anthropic = await fakeServer(() => anthropicHandler, anthropicLog);
@@ -92,10 +101,13 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
       classifierTimeoutMs: 1_000,
       classifierMaxChars: 4_000,
     });
+    db = openTelemetryDb(':memory:');
+    telemetry = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
     proxy = buildServer({
       config,
       router,
       providers: { primary: new AnthropicProvider(config.primary), cheap: new OpenAICompatibleProvider(config.cheap) },
+      telemetry,
     });
     await proxy.listen({ host: '127.0.0.1', port: 0 });
     proxyUrl = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
@@ -103,6 +115,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
 
   after(async () => {
     await proxy.close();
+    await telemetry.close();
     anthropic.server.close();
     cheap.server.close();
   });
@@ -196,6 +209,63 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(res.statusCode, 429);
     assert.equal(res.headers['retry-after'], '30');
     assert.deepEqual(body, { type: 'error', error: { type: 'rate_limit_error', message: 'quota' } });
+  });
+
+  /** Rows land after the client connection closes; flush and give the close handler a tick. */
+  async function logsFor(sessionId: string): Promise<RouterLog[]> {
+    for (let i = 0; i < 20; i++) {
+      await sleep(10);
+      telemetry.flush();
+      const rows = db.select().from(routerLogs).all().filter((r) => r.sessionId?.startsWith(`${sessionId}:`));
+      if (rows.length > 0) return rows;
+    }
+    return [];
+  }
+
+  it('records one telemetry row per exchange, with provider, tokens and JEV verdict', async () => {
+    await (await claudeCode('T-cheap', 'fix the typo in the README')).body.text();
+    await (await claudeCode('T-primary', 'refactor the data layer to clean architecture')).body.text();
+
+    const [cheapRow] = await logsFor('T-cheap');
+    assert.ok(cheapRow);
+    assert.equal(cheapRow.finalProvider, 'openai');
+    assert.equal(cheapRow.model, 'openai/gpt-oss-20b');
+    assert.equal(cheapRow.outcome, 'ok');
+    assert.equal(cheapRow.tokensIn, 40);
+    assert.equal(cheapRow.tokensOut, 5);
+    assert.equal(cheapRow.fallbackTriggered, false);
+    assert.match(cheapRow.humanPromptHash ?? '', /^[0-9a-f]{64}$/);
+    assert.ok(cheapRow.jevDecision && cheapRow.jevDecision.pSimple >= 0.8);
+    assert.ok(cheapRow.latencyMs >= 150, 'latency covers the whole stream');
+
+    const [primaryRow] = await logsFor('T-primary');
+    assert.ok(primaryRow);
+    assert.equal(primaryRow.finalProvider, 'anthropic');
+    assert.equal(primaryRow.model, 'claude-opus-5-5');
+    assert.equal(primaryRow.tokensIn, 100, 'uncached + cache reads');
+    assert.equal(primaryRow.cacheReadTokens, 90);
+    assert.equal(primaryRow.tokensOut, 25);
+    assert.equal(primaryRow.httpStatus, 200);
+  });
+
+  it('flags the fallback when the cheap provider fails and Anthropic answers', async () => {
+    cheapHandler = openAi503;
+    await (await claudeCode('T-fallback', 'fix the typo')).body.text();
+    const [row] = await logsFor('T-fallback');
+    assert.ok(row);
+    assert.equal(row.finalProvider, 'anthropic');
+    assert.equal(row.routeReason, 'failover:cheap-unavailable');
+    assert.equal(row.fallbackTriggered, true);
+  });
+
+  it('records relayed upstream errors as http_error', async () => {
+    anthropicHandler = anthropic429;
+    cheapHandler = openAi503;
+    await (await claudeCode('T-429', 'refactor everything')).body.text();
+    const [row] = await logsFor('T-429');
+    assert.ok(row);
+    assert.equal(row.httpStatus, 429);
+    assert.equal(row.outcome, 'http_error');
   });
 
   it('passes count_tokens and unknown endpoints straight to Anthropic', async () => {

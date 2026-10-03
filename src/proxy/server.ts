@@ -1,17 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Dispatcher } from 'undici';
 import type { Config } from '../config.js';
 import type { Route } from '../domain/policy.js';
 import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
-import { parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
+import { latestHumanText, parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
 import type { RouteDecision, Router } from '../routing/router.js';
+import { auditExchange, auditFailure, type ExchangeContext } from '../telemetry/audit.js';
+import { noopTelemetry, type TelemetrySink } from '../telemetry/recorder.js';
 import { forwardableHeaders, presentedCredential, single } from './headers.js';
 
 export interface ServerDeps {
   readonly config: Config;
   readonly router: Router;
   readonly providers: Readonly<Record<Route, Provider>>;
+  readonly telemetry?: TelemetrySink;
 }
 
 /** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
@@ -27,7 +31,7 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function buildServer({ config, router, providers }: ServerDeps): FastifyInstance {
+export function buildServer({ config, router, providers, telemetry = noopTelemetry }: ServerDeps): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
     bodyLimit: config.bodyLimitBytes,
@@ -55,6 +59,8 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
   app.all('*', async (req, reply) => relay(reply, await providers.primary.send(providerRequest(req, reply))));
 
   async function handleMessages(req: FastifyRequest, reply: FastifyReply) {
+    const startedAt = performance.now();
+    const startedAtMs = Date.now();
     const base = providerRequest(req, reply);
     // Unparseable → let Anthropic return its canonical validation error.
     if (!base.body || !base.rawBody) return relay(reply, await providers.primary.send(base));
@@ -68,14 +74,22 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
       contextCompacted: single(req.headers, 'x-claude-code-context-compacted') !== undefined,
     });
 
+    const exchange = (route: Route): ExchangeContext => ({
+      startedAt,
+      startedAtMs,
+      humanText: latestHumanText(base.body!),
+      requestClass: single(req.headers, 'x-claude-code-request-class'),
+      model: route === 'cheap' ? config.cheap.model : base.body!.model,
+    });
+
     if (decision.route === 'cheap') {
       const cheap = await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
-      if (cheap.kind === 'response') return relay(reply, cheap, decision, req);
+      if (cheap.kind === 'response') return relay(reply, cheap, decision, req, exchange('cheap'));
 
       router.pinToPrimary(decision);
       const failover: RouteDecision = { ...decision, route: 'primary', reason: 'failover:cheap-unavailable' };
       req.log.warn({ reason: cheap.reason, conversation: decision.conversationKey }, 'cheap provider unavailable');
-      return relay(reply, await providers.primary.send(base), failover, req);
+      return relay(reply, await providers.primary.send(base), failover, req, exchange('primary'));
     }
 
     const primary = await providers.primary.send(base);
@@ -84,7 +98,7 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
       !config.router.failoverOnPrimaryRateLimit ||
       !PRIMARY_RATE_LIMITED.has(primary.status)
     ) {
-      return relay(reply, primary, decision, req);
+      return relay(reply, primary, decision, req, exchange('primary'));
     }
 
     // Quota failover: hold the (small) error body so it can still be relayed
@@ -92,10 +106,16 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
     const errorBody = Buffer.concat(await primary.body.toArray());
     const cheap = await providers.cheap.send(base);
     if (cheap.kind === 'response') {
-      return relay(reply, cheap, { ...decision, route: 'cheap', reason: 'failover:primary-rate-limited' }, req);
+      return relay(
+        reply,
+        cheap,
+        { ...decision, route: 'cheap', reason: 'failover:primary-rate-limited' },
+        req,
+        exchange('cheap'),
+      );
     }
-    reply.code(primary.status).headers(primary.headers);
-    return reply.send(errorBody);
+    const original: ProviderResult = { ...primary, body: Readable.from([errorBody]) };
+    return relay(reply, original, decision, req, exchange('primary'));
   }
 
   function providerRequest(req: FastifyRequest, reply: FastifyReply): ProviderRequest {
@@ -115,8 +135,16 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
     };
   }
 
-  function relay(reply: FastifyReply, result: ProviderResult, decision?: RouteDecision, req?: FastifyRequest) {
+  function relay(
+    reply: FastifyReply,
+    result: ProviderResult,
+    decision?: RouteDecision,
+    req?: FastifyRequest,
+    exchange?: ExchangeContext,
+  ) {
+    const audited = decision && exchange;
     if (result.kind === 'unavailable') {
+      if (audited) auditFailure(telemetry, decision, exchange);
       return reply.code(502).send(anthropicError('api_error', `jev-router: ${result.reason}`));
     }
     if (decision) {
@@ -124,7 +152,12 @@ export function buildServer({ config, router, providers }: ServerDeps): FastifyI
       reply.header('x-jev-route', `${decision.route}; reason=${decision.reason}`);
     }
     reply.code(result.status).headers(result.headers);
-    return reply.send(result.body);
+    const body = audited
+      ? auditExchange(telemetry, reply.raw, result, decision, exchange, (err) =>
+          reply.log.warn({ err }, 'telemetry failed'),
+        )
+      : result.body;
+    return reply.send(body);
   }
 
   app.setErrorHandler((err, req, reply) => {
