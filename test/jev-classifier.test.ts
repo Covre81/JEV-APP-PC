@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
-import { JevClassifier, scoresFromDistribution } from '../src/classifier/jev-classifier.js';
+import { JevClassifier } from '../src/classifier/jev-classifier.js';
 
 const input = { text: 'rename foo to bar', turnCount: 1, toolCount: 20, estimatedInputTokens: 30_000 };
 
@@ -11,12 +11,6 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   for await (const c of req) chunks.push(c as Buffer);
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-
-describe('scoresFromDistribution', () => {
-  it('turns the ordinal distribution into cumulative sufficiency', () => {
-    assert.deepEqual(scoresFromDistribution({ '0': 0.7, '1': 0.25, '2': 0.05 }), { haiku: 70, sonnet: 95, opus: 100 });
-  });
-});
 
 describe('JevClassifier', () => {
   let server: Server;
@@ -34,11 +28,11 @@ describe('JevClassifier', () => {
             ? {
                 model: 'jev-1.13.0',
                 answers: {
-                  required_tier: {
+                  task_complexity: {
                     type: 'score',
                     score: 0.35,
                     legend: { '0': 'a', '1': 'b', '2': 'c' },
-                    probabilities: { '0': 0.8, '1': 0.15, '2': 0.05 },
+                    probabilities: { '0': 0.6, '1': 0.3, '2': 0.1 },
                     confidence: 0.9,
                   },
                 },
@@ -52,16 +46,17 @@ describe('JevClassifier', () => {
   });
   after(() => server.close());
 
-  it('sends one typed score question and maps the answer', async () => {
+  it('sends one typed score question and returns the distribution', async () => {
     const jev = new JevClassifier({ apiUrl: url, apiKey: 'ts_test', model: 'jev-latest' });
     const scores = await jev.classify(input, AbortSignal.timeout(1_000));
 
-    assert.deepEqual(scores, { haiku: 80, sonnet: 95, opus: 100 });
+    assert.equal(scores.simple.toFixed(2), '0.60');
+    assert.equal(scores.structural.toFixed(2), '0.10');
     assert.equal(lastRequest?.headers.authorization, 'Bearer ts_test');
     assert.equal(lastRequest?.body.model, 'jev-latest');
     assert.match(lastRequest?.body.state, /rename foo to bar/);
-    assert.equal(lastRequest?.body.questions.required_tier.type, 'score');
-    assert.equal(lastRequest?.body.questions.required_tier.criteria.length, 3);
+    assert.equal(lastRequest?.body.questions.task_complexity.type, 'score');
+    assert.equal(lastRequest?.body.questions.task_complexity.criteria.length, 3);
   });
 
   it('rejects on non-200 so the router can fail open', async () => {

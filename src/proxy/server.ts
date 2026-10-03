@@ -2,26 +2,20 @@ import { timingSafeEqual } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Dispatcher } from 'undici';
 import type { Config } from '../config.js';
-import { profileFor } from '../domain/model-catalog.js';
-import { parseMessagesBody } from '../routing/messages-body.js';
-import { adaptForModel } from '../routing/request-adapter.js';
+import type { Route } from '../domain/policy.js';
+import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
+import { parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
 import type { RouteDecision, Router } from '../routing/router.js';
 import { forwardableHeaders, presentedCredential, single } from './headers.js';
-import { relayableHeaders, type Upstream } from './upstream.js';
 
 export interface ServerDeps {
   readonly config: Config;
   readonly router: Router;
-  readonly upstream: Upstream;
+  readonly providers: Readonly<Record<Route, Provider>>;
 }
 
-/**
- * Statuses on which a *rewritten* request is replayed verbatim on the model the
- * client asked for: the cheaper model rejected something in the body
- * (unsupported field/beta, prompt too long, model not enabled for this key).
- * Safe to replay because nothing has been streamed to the client yet.
- */
-const REPLAY_ON_REQUESTED_MODEL = new Set([400, 404, 422]);
+/** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
+const PRIMARY_RATE_LIMITED = new Set([429, 529]);
 
 function anthropicError(type: string, message: string) {
   return { type: 'error', error: { type, message } };
@@ -33,18 +27,18 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function buildServer({ config, router, upstream }: ServerDeps): FastifyInstance {
+export function buildServer({ config, router, providers }: ServerDeps): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel },
     bodyLimit: config.bodyLimitBytes,
     exposeHeadRoutes: false,
   });
 
-  // Keep every body as raw bytes: untouched requests are forwarded byte-for-byte.
+  // Keep every body as raw bytes: primary-bound requests are forwarded byte-for-byte.
   app.removeAllContentTypeParsers();
   app.addContentTypeParser('*', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
 
-  const proxyToken = config.upstream.authMode === 'inject' ? config.proxyAuthToken : undefined;
+  const proxyToken = config.primary.authMode === 'inject' ? config.proxyAuthToken : undefined;
   if (proxyToken) {
     app.addHook('onRequest', async (req, reply) => {
       if (req.url === '/healthz') return;
@@ -56,84 +50,88 @@ export function buildServer({ config, router, upstream }: ServerDeps): FastifyIn
   }
 
   app.get('/healthz', async () => ({ ok: true }));
+  app.post('/v1/messages', handleMessages);
+  // count_tokens, /v1/models, HEAD /api/hello, … are Anthropic concerns: pass through.
+  app.all('*', async (req, reply) => relay(reply, await providers.primary.send(providerRequest(req, reply))));
 
-  app.post('/v1/messages', (req, reply) => handleMessages(req, reply, true));
-  app.post('/v1/messages/count_tokens', (req, reply) => handleMessages(req, reply, false));
-  // Everything else (/v1/models, HEAD /api/hello, …) is a transparent pass-through.
-  app.all('*', (req, reply) => forward(req, reply, rawBody(req)));
-
-  async function handleMessages(req: FastifyRequest, reply: FastifyReply, mayClassify: boolean) {
-    const raw = rawBody(req);
-    const body = raw ? parseMessagesBody(raw) : undefined;
+  async function handleMessages(req: FastifyRequest, reply: FastifyReply) {
+    const base = providerRequest(req, reply);
     // Unparseable → let Anthropic return its canonical validation error.
-    if (!raw || !body) return forward(req, reply, raw);
+    if (!base.body || !base.rawBody) return relay(reply, await providers.primary.send(base));
 
     const decision = await router.decide({
-      body,
-      rawByteLength: raw.length,
+      body: base.body,
+      rawByteLength: base.rawBody.length,
       sessionId: single(req.headers, 'x-claude-code-session-id'),
       agentId: single(req.headers, 'x-claude-code-agent-id'),
       requestClass: single(req.headers, 'x-claude-code-request-class'),
       contextCompacted: single(req.headers, 'x-claude-code-context-compacted') !== undefined,
-      mayClassify,
     });
-    req.log.info({ route: decision }, 'route decision');
 
-    if (decision.model === body.model) return forward(req, reply, raw, decision);
+    if (decision.route === 'cheap') {
+      const cheap = await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      if (cheap.kind === 'response') return relay(reply, cheap, decision, req);
 
-    const adapted = adaptForModel(body, decision.model, profileFor(decision.model));
-    return forward(req, reply, Buffer.from(JSON.stringify(adapted)), decision, raw);
+      router.pinToPrimary(decision);
+      const failover: RouteDecision = { ...decision, route: 'primary', reason: 'failover:cheap-unavailable' };
+      req.log.warn({ reason: cheap.reason, conversation: decision.conversationKey }, 'cheap provider unavailable');
+      return relay(reply, await providers.primary.send(base), failover, req);
+    }
+
+    const primary = await providers.primary.send(base);
+    if (
+      primary.kind === 'unavailable' ||
+      !config.router.failoverOnPrimaryRateLimit ||
+      !PRIMARY_RATE_LIMITED.has(primary.status)
+    ) {
+      return relay(reply, primary, decision, req);
+    }
+
+    // Quota failover: hold the (small) error body so it can still be relayed
+    // verbatim if the cheap provider cannot take the request either.
+    const errorBody = Buffer.concat(await primary.body.toArray());
+    const cheap = await providers.cheap.send(base);
+    if (cheap.kind === 'response') {
+      return relay(reply, cheap, { ...decision, route: 'cheap', reason: 'failover:primary-rate-limited' }, req);
+    }
+    reply.code(primary.status).headers(primary.headers);
+    return reply.send(errorBody);
   }
 
-  async function forward(
-    req: FastifyRequest,
-    reply: FastifyReply,
-    body: Buffer | undefined,
-    decision?: RouteDecision,
-    originalBody?: Buffer,
-  ) {
+  function providerRequest(req: FastifyRequest, reply: FastifyReply): ProviderRequest {
     const controller = new AbortController();
     reply.raw.once('close', () => {
       if (!reply.raw.writableFinished) controller.abort();
     });
-
-    const send = (payload: Buffer | undefined) =>
-      upstream.send({
-        method: req.method as Dispatcher.HttpMethod,
-        url: req.url,
-        headers: forwardableHeaders(req.headers),
-        body: payload,
-        signal: controller.signal,
-      });
-
-    try {
-      let res = await send(body);
-      let effective = decision;
-
-      if (originalBody && decision && REPLAY_ON_REQUESTED_MODEL.has(res.statusCode)) {
-        req.log.warn(
-          { status: res.statusCode, routedModel: decision.model, requestedModel: decision.requestedModel },
-          'routed request rejected upstream; replaying on requested model',
-        );
-        await res.body.dump();
-        router.pinToRequested(decision);
-        res = await send(originalBody);
-        effective = { ...decision, model: decision.requestedModel, reason: 'fallback:upstream-rejected' };
-      }
-
-      reply.code(res.statusCode).headers(relayableHeaders(res));
-      if (effective) reply.header('x-jev-route', `${effective.model}; reason=${effective.reason}`);
-      return reply.send(res.body);
-    } catch (err) {
-      if (controller.signal.aborted) return reply; // client went away; nothing to answer
-      req.log.error({ err }, 'upstream request failed');
-      return reply.code(502).send(anthropicError('api_error', 'jev-router: upstream unreachable'));
-    }
+    const rawBody = Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
+    const body: MessagesBody | undefined = rawBody && req.url.startsWith('/v1/messages') ? parseMessagesBody(rawBody) : undefined;
+    return {
+      method: req.method as Dispatcher.HttpMethod,
+      url: req.url,
+      headers: forwardableHeaders(req.headers),
+      rawBody,
+      body,
+      signal: controller.signal,
+    };
   }
 
-  return app;
-}
+  function relay(reply: FastifyReply, result: ProviderResult, decision?: RouteDecision, req?: FastifyRequest) {
+    if (result.kind === 'unavailable') {
+      return reply.code(502).send(anthropicError('api_error', `jev-router: ${result.reason}`));
+    }
+    if (decision) {
+      req?.log.info({ route: decision }, 'route decision');
+      reply.header('x-jev-route', `${decision.route}; reason=${decision.reason}`);
+    }
+    reply.code(result.status).headers(result.headers);
+    return reply.send(result.body);
+  }
 
-function rawBody(req: FastifyRequest): Buffer | undefined {
-  return Buffer.isBuffer(req.body) && req.body.length > 0 ? req.body : undefined;
+  app.setErrorHandler((err, req, reply) => {
+    if (reply.raw.destroyed) return; // client went away mid-request
+    req.log.error({ err }, 'request failed');
+    return reply.code(502).send(anthropicError('api_error', 'jev-router: upstream unreachable'));
+  });
+
+  return app;
 }

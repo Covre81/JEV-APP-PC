@@ -1,4 +1,4 @@
-import type { TierScores } from '../domain/tiers.js';
+import type { ComplexityDistribution } from '../domain/complexity.js';
 
 /** Signals extracted from a Messages request, independent of any vendor. */
 export interface ClassificationInput {
@@ -11,9 +11,9 @@ export interface ClassificationInput {
 
 /**
  * System One port. Implementations must be fast (sub-second), side-effect
- * free, and either resolve with scores or reject — never guess silently.
+ * free, and either resolve with a distribution or reject — never guess silently.
  */
 export interface ComplexityClassifier {
   readonly name: string;
-  classify(input: ClassificationInput, signal: AbortSignal): Promise<TierScores>;
+  classify(input: ClassificationInput, signal: AbortSignal): Promise<ComplexityDistribution>;
 }

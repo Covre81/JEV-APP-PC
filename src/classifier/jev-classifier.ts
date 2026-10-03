@@ -1,22 +1,22 @@
 import { request } from 'undici';
 import { z } from 'zod';
-import type { TierScores } from '../domain/tiers.js';
+import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
 import type { ClassificationInput, ComplexityClassifier } from './classifier.js';
 
 /**
  * Adapter for TypeSafe JEV (`POST /v1/systemone`).
  *
  * JEV does not generate text: it answers typed questions about a `state` with
- * calibrated probabilities. We ask ONE ordinal `score` question whose levels
- * are the tiers, then turn the level distribution into cumulative
- * sufficiency: P(haiku suffices) = p0, P(sonnet suffices) = p0 + p1, opus = 1.
+ * calibrated probabilities. We ask ONE ordinal `score` question with three
+ * levels and keep the full distribution — the policy, not the classifier,
+ * decides what to do with uncertainty.
  */
-const QUESTION_ID = 'required_tier';
+const QUESTION_ID = 'task_complexity';
 
-const TIER_CRITERIA = [
-  'Trivial or mechanical: a question, an explanation, a one-file edit, a rename, formatting, running a known command. No design decisions.',
-  'Standard engineering: a multi-file feature or bugfix in a known codebase, writing tests, debugging with a clear reproduction.',
-  'Hard reasoning: architecture or cross-cutting refactors, concurrency/security/performance root-cause analysis, ambiguous requirements, novel algorithms, long autonomous work.',
+const COMPLEXITY_CRITERIA = [
+  'Simple and self-contained: answering a question, explaining code, a one-file edit, a rename, formatting, a docstring or a single small unit test, running a known command.',
+  'Standard feature work: a bugfix or feature touching a few files, a React Native screen or hook, a Python module with its tests, debugging with a clear reproduction.',
+  'Structural or complex: Clean Architecture/SOLID refactors across layers, test-suite design with heavy fixtures or mocking, concurrency, security or performance root causes, migrations, ambiguous requirements.',
 ] as const;
 
 const JevResponse = z.looseObject({
@@ -38,7 +38,7 @@ export class JevClassifier implements ComplexityClassifier {
 
   constructor(private readonly options: JevClassifierOptions) {}
 
-  async classify(input: ClassificationInput, signal: AbortSignal): Promise<TierScores> {
+  async classify(input: ClassificationInput, signal: AbortSignal): Promise<ComplexityDistribution> {
     const res = await request(this.options.apiUrl, {
       method: 'POST',
       signal,
@@ -52,9 +52,8 @@ export class JevClassifier implements ComplexityClassifier {
         questions: {
           [QUESTION_ID]: {
             type: 'score',
-            instructions:
-              'What is the least capable tier of AI coding assistant that will complete this developer request correctly on the first attempt?',
-            criteria: TIER_CRITERIA,
+            instructions: 'How complex is this request for an AI coding agent working in the developer repository?',
+            criteria: COMPLEXITY_CRITERIA,
           },
         },
       }),
@@ -65,17 +64,9 @@ export class JevClassifier implements ComplexityClassifier {
       throw new Error(`JEV HTTP ${res.statusCode}: ${JSON.stringify(payload).slice(0, 300)}`);
     }
 
-    const { probabilities } = JevResponse.parse(payload).answers[QUESTION_ID]!;
-    return scoresFromDistribution(probabilities);
+    const { probabilities: p } = JevResponse.parse(payload).answers[QUESTION_ID]!;
+    return toDistribution(p['0'] ?? 0, p['1'] ?? 0, p['2'] ?? 0);
   }
-}
-
-/** Ordinal level distribution → cumulative sufficiency scores (0–100). */
-export function scoresFromDistribution(probabilities: Readonly<Record<string, number>>): TierScores {
-  const p0 = probabilities['0'] ?? 0;
-  const p1 = probabilities['1'] ?? 0;
-  const pct = (p: number) => Math.round(Math.min(1, Math.max(0, p)) * 100);
-  return { haiku: pct(p0), sonnet: pct(p0 + p1), opus: 100 };
 }
 
 /** JEV consumes unstructured state; give it the request plus the cheap structural signals. */

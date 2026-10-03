@@ -1,7 +1,6 @@
 import type { ComplexityClassifier } from '../classifier/classifier.js';
-import { profileFor, tierOfModel } from '../domain/model-catalog.js';
-import { selectTier } from '../domain/policy.js';
-import { maxTier, minTier, TIERS, type Tier, type TierScores } from '../domain/tiers.js';
+import type { ComplexityDistribution } from '../domain/complexity.js';
+import { selectRoute, stickyRoute, type PolicyOptions, type Route } from '../domain/policy.js';
 import {
   conversationFingerprint,
   estimateInputTokens,
@@ -12,7 +11,6 @@ import {
 import type { TtlLruStore } from './session-store.js';
 
 export type RouteReason =
-  | 'passthrough:unknown-model'
   | 'passthrough:request-class'
   | 'passthrough:no-session-state'
   | 'passthrough:classifier-failed'
@@ -20,16 +18,14 @@ export type RouteReason =
   | 'classified'
   | 'escalated'
   | 'escalated:context'
-  | 'fallback:upstream-rejected';
+  | 'failover:cheap-unavailable'
+  | 'failover:primary-rate-limited';
 
 export interface RouteDecision {
-  /** Model to send upstream. Equal to `body.model` means: do not touch the body. */
-  readonly model: string;
-  readonly requestedModel: string;
-  readonly tier: Tier | undefined;
+  readonly route: Route;
   readonly reason: RouteReason;
   readonly conversationKey: string | undefined;
-  readonly scores?: TierScores;
+  readonly distribution?: ComplexityDistribution;
   readonly classifierMs?: number;
   readonly classifierError?: string;
 }
@@ -42,101 +38,80 @@ export interface RequestContext {
   readonly agentId: string | undefined;
   readonly requestClass: string | undefined;
   readonly contextCompacted: boolean;
-  /** False for count_tokens: reuse the sticky decision, never spend a classification. */
-  readonly mayClassify: boolean;
 }
 
 export interface RouterOptions {
-  readonly threshold: number;
+  readonly policy: PolicyOptions;
   readonly allowEscalation: boolean;
-  readonly passthroughClasses: ReadonlySet<string>;
-  readonly models: Readonly<Record<Tier, string>>;
+  /** x-claude-code-request-class values that always use the primary provider. */
+  readonly primaryClasses: ReadonlySet<string>;
+  /** Input-token budget of the cheap model (its context window minus headroom). */
+  readonly cheapContextTokens: number;
   readonly classifierTimeoutMs: number;
   readonly classifierMaxChars: number;
 }
 
-/** Fraction of a model's context window we allow before excluding it. */
-const CONTEXT_HEADROOM = 0.9;
-
 /**
- * Session-sticky, escalate-only router.
+ * Multi-provider router: decides, per conversation, between a cheap
+ * OpenAI-compatible provider and the primary Anthropic quota. It only decides —
+ * base URLs, headers and wire formats belong to `src/providers`.
  *
- * Why not per-request routing: prompt caches and thinking blocks are bound to
- * the model. Flipping models between agent-loop steps re-bills the entire
- * history uncached and discards reasoning — routinely costing more than the
- * cheaper model saves. So:
- *   - tool-result continuations reuse the conversation's tier (no classification);
- *   - a new human turn is classified, and may only escalate the tier;
- *   - a fresh or just-compacted conversation is classified from scratch;
- *   - the model the client asked for is a hard ceiling.
+ * Rules:
+ *   - a fresh (or just-compacted) conversation is classified by JEV;
+ *   - tool-result continuations reuse the conversation's route (no JEV call);
+ *   - a new human turn on the cheap route is re-classified and may escalate;
+ *   - primary is terminal: conversations never fall back to cheap;
+ *   - anything the cheap model cannot hold (context) goes primary;
+ *   - JEV failure fails toward primary — losing savings, never correctness.
  */
 export class Router {
   constructor(
     private readonly classifier: ComplexityClassifier,
-    private readonly sessions: TtlLruStore<Tier>,
+    private readonly sessions: TtlLruStore<Route>,
     private readonly options: RouterOptions,
   ) {}
 
   async decide(ctx: RequestContext): Promise<RouteDecision> {
-    const requestedModel = ctx.body.model;
-    const ceiling = tierOfModel(requestedModel);
-    const base = { requestedModel, conversationKey: undefined } as const;
-
-    if (!ceiling) return { ...base, model: requestedModel, tier: undefined, reason: 'passthrough:unknown-model' };
-    if (ctx.requestClass && this.options.passthroughClasses.has(ctx.requestClass)) {
-      return { ...base, model: requestedModel, tier: ceiling, reason: 'passthrough:request-class' };
+    if (ctx.requestClass && this.options.primaryClasses.has(ctx.requestClass)) {
+      return { route: 'primary', reason: 'passthrough:request-class', conversationKey: undefined };
     }
 
     const key = ctx.sessionId
       ? `${ctx.sessionId}:${ctx.agentId ?? 'main'}`
       : `fp:${conversationFingerprint(ctx.body)}`;
     const fresh = isFreshConversation(ctx.body) || ctx.contextCompacted;
-    const stored = this.sessions.get(key);
     const inputTokens = estimateInputTokens(ctx.rawByteLength);
-    const tooSmall = this.tiersTooSmallFor(inputTokens);
+    const fitsCheap = inputTokens <= this.options.cheapContextTokens;
 
-    const resolve = (tier: Tier, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
-      // A growing conversation can outgrow its tier's window (Claude Code believes
-      // it talks to the requested model and won't compact early): bump it.
-      const fitted = tooSmall.has(tier) ? this.cheapestFitting(tooSmall, ceiling) : tier;
-      const capped = minTier(maxTier(tier, fitted), ceiling);
-      this.sessions.set(key, capped);
-      return {
-        ...base,
-        ...extra,
-        conversationKey: key,
-        tier: capped,
-        reason: fitted !== tier && capped !== tier ? 'escalated:context' : reason,
-        // Same tier as requested → keep the client's exact model (e.g. Fable stays Fable).
-        model: capped === ceiling ? requestedModel : this.options.models[capped],
-      };
+    const resolve = (route: Route, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
+      const escalatedByContext = route === 'cheap' && !fitsCheap;
+      const final: Route = escalatedByContext ? 'primary' : route;
+      this.sessions.set(key, final);
+      return { ...extra, route: final, reason: escalatedByContext ? 'escalated:context' : reason, conversationKey: key };
     };
-    const passthrough = (reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => ({
-      ...base,
+    const primary = (reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => ({
       ...extra,
-      conversationKey: key,
-      model: requestedModel,
-      tier: ceiling,
+      route: 'primary',
       reason,
+      conversationKey: key,
     });
 
-    if (!ctx.mayClassify) return stored ? resolve(stored, 'sticky') : passthrough('passthrough:no-session-state');
+    // A conversation we hold no state for (proxy restart, TTL expiry) has been
+    // running on the primary: keep it there rather than switching mid-flight.
+    const sticky: Route | undefined = fresh ? undefined : (this.sessions.get(key) ?? 'primary');
 
-    // An ongoing conversation we hold no state for (proxy restart, TTL expiry)
-    // has been running on the client's model: treat that as its tier, so a
-    // later classification can only escalate it, never yank it down mid-flight.
-    const sticky = fresh ? undefined : (stored ?? ceiling);
+    if (sticky === 'primary') return resolve('primary', 'sticky');
+
     const humanText = latestHumanText(ctx.body);
-
     if (humanText === undefined) {
-      return sticky ? resolve(sticky, 'sticky') : passthrough('passthrough:no-session-state');
+      return sticky ? resolve(sticky, 'sticky') : primary('passthrough:no-session-state');
     }
     if (sticky && !this.options.allowEscalation) return resolve(sticky, 'sticky');
 
     const started = performance.now();
-    let scores: TierScores;
+    let distribution: ComplexityDistribution;
     try {
-      scores = await this.classifier.classify(
+      distribution = await this.classifier.classify(
         {
           text: humanText.slice(0, this.options.classifierMaxChars),
           turnCount: ctx.body.messages.length,
@@ -147,42 +122,21 @@ export class Router {
       );
     } catch (err) {
       const classifierError = err instanceof Error ? err.message : String(err);
-      // Fail-open toward quality: keep the conversation's tier, else the client's model.
       return sticky
         ? resolve(sticky, 'sticky', { classifierError })
-        : passthrough('passthrough:classifier-failed', { classifierError });
+        : primary('passthrough:classifier-failed', { classifierError });
     }
     const classifierMs = Math.round(performance.now() - started);
 
-    const proposed = selectTier({
-      scores,
-      threshold: this.options.threshold,
-      ceiling,
-      excluded: tooSmall,
-    });
+    const proposed = selectRoute(distribution, this.options.policy);
+    if (!sticky) return resolve(proposed, 'classified', { distribution, classifierMs });
 
-    if (!sticky) return resolve(proposed, 'classified', { scores, classifierMs });
-    // Never de-escalate an ongoing conversation: same quality, but a cold cache.
-    const next = maxTier(sticky, proposed);
-    return resolve(next, next === sticky ? 'sticky' : 'escalated', { scores, classifierMs });
+    const next = stickyRoute(sticky, proposed);
+    return resolve(next, next === sticky ? 'sticky' : 'escalated', { distribution, classifierMs });
   }
 
-  /**
-   * The routed model rejected the request: run the rest of this conversation on
-   * the model the client asked for instead of failing the same way every turn.
-   */
-  pinToRequested(decision: RouteDecision): void {
-    const tier = tierOfModel(decision.requestedModel);
-    if (decision.conversationKey && tier) this.sessions.set(decision.conversationKey, tier);
-  }
-
-  private cheapestFitting(tooSmall: ReadonlySet<Tier>, ceiling: Tier): Tier {
-    return TIERS.find((t) => !tooSmall.has(t)) ?? ceiling;
-  }
-
-  private tiersTooSmallFor(tokens: number): ReadonlySet<Tier> {
-    return new Set(
-      TIERS.filter((t) => profileFor(this.options.models[t]).contextWindow * CONTEXT_HEADROOM < tokens),
-    );
+  /** The cheap provider could not serve this conversation: keep it on the primary from now on. */
+  pinToPrimary(decision: RouteDecision): void {
+    if (decision.conversationKey) this.sessions.set(decision.conversationKey, 'primary');
   }
 }

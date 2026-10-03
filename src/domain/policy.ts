@@ -1,32 +1,37 @@
-import { TIERS, tierRank, type Tier, type TierScores } from './tiers.js';
+import type { ComplexityDistribution } from './complexity.js';
 
-export interface PolicyInput {
-  readonly scores: TierScores;
-  /** Minimum sufficiency confidence (0–100) required to accept a tier. */
-  readonly threshold: number;
-  /** Highest tier the router may choose (normally the tier the client asked for). */
-  readonly ceiling: Tier;
-  /** Tiers excluded up front (e.g. context too large for the model's window). */
-  readonly excluded?: ReadonlySet<Tier>;
+/**
+ * Where a conversation runs.
+ *   cheap   — an OpenAI-compatible provider (Groq, OpenRouter, …), billed per token
+ *   primary — Anthropic, the quota reserved for heavy lifting
+ */
+export type Route = 'cheap' | 'primary';
+
+export interface PolicyOptions {
+  /** Minimum probability that the task is cheap-eligible before leaving the primary quota. */
+  readonly minCheapProbability: number;
+  /** Where level-2 ("standard") work goes. `primary` unless you have measured otherwise. */
+  readonly standardRoute: Route;
 }
 
 /**
- * Deterministic System-One → model decision.
+ * Deterministic System-One decision.
  *
- * Rule: walk tiers from cheapest to most capable and take the first one whose
- * sufficiency score clears the threshold. If none does, fall back to the
- * ceiling (fail-up: an uncertain classification must never degrade quality).
- *
- * Pure function: same input, same output. No I/O, no clock, no randomness.
+ * Not argmax: a distribution like {simple: .45, standard: .30, structural: .25}
+ * has "simple" as its mode, yet a 55% chance the cheap model is out of its
+ * depth. We send work to the cheap provider only when the probability mass of
+ * cheap-eligible levels clears the bar; everything else stays on the primary.
  */
-export function selectTier(input: PolicyInput): Tier {
-  const { scores, threshold, ceiling, excluded } = input;
-  const ceilingRank = tierRank(ceiling);
+export function selectRoute(d: ComplexityDistribution, options: PolicyOptions): Route {
+  const cheapMass = options.standardRoute === 'cheap' ? d.simple + d.standard : d.simple;
+  return cheapMass >= options.minCheapProbability ? 'cheap' : 'primary';
+}
 
-  for (const tier of TIERS) {
-    if (tierRank(tier) > ceilingRank) break;
-    if (excluded?.has(tier)) continue;
-    if (scores[tier] >= threshold) return tier;
-  }
-  return ceiling;
+/**
+ * Escalate-only: once a conversation reaches the primary provider it stays
+ * there. Bouncing back to the cheap model would throw away the Anthropic
+ * prompt cache, which the next escalation would have to rebuild at full price.
+ */
+export function stickyRoute(current: Route, proposed: Route): Route {
+  return current === 'primary' || proposed === 'primary' ? 'primary' : 'cheap';
 }

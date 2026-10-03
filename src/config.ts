@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Tier } from './domain/tiers.js';
+import type { Route } from './domain/policy.js';
 
 const bool = z.enum(['true', 'false']).transform((v) => v === 'true');
 const csv = z.string().transform((v) => new Set(v.split(',').map((s) => s.trim()).filter(Boolean)));
@@ -26,15 +26,20 @@ const Env = z
     JEV_TIMEOUT_MS: z.coerce.number().int().positive().default(1_500),
     CLASSIFIER_MAX_CHARS: z.coerce.number().int().positive().default(4_000),
 
-    ROUTER_THRESHOLD: z.coerce.number().min(0).max(100).default(80),
+    CHEAP_BASE_URL: z.url().default('https://api.groq.com/openai/v1'),
+    CHEAP_API_KEY: z.string().min(1),
+    CHEAP_MODEL: z.string().min(1).default('openai/gpt-oss-20b'),
+    CHEAP_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8_192),
+    CHEAP_CONTEXT_TOKENS: z.coerce.number().int().positive().default(131_072),
+    CHEAP_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+
+    ROUTER_MIN_CHEAP_PROBABILITY: z.coerce.number().min(0).max(1).default(0.8),
+    ROUTER_STANDARD_ROUTE: z.enum(['primary', 'cheap']).default('primary'),
     ROUTER_ALLOW_ESCALATION: bool.default(true),
-    ROUTER_PASSTHROUGH_CLASSES: csv.default(new Set(['auxiliary', 'compaction'])),
+    ROUTER_PRIMARY_CLASSES: csv.default(new Set(['auxiliary', 'compaction'])),
+    FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(false),
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
     SESSION_MAX_ENTRIES: z.coerce.number().int().positive().default(10_000),
-
-    MODEL_HAIKU: z.string().default('claude-haiku-4-5'),
-    MODEL_SONNET: z.string().default('claude-sonnet-5-5'),
-    MODEL_OPUS: z.string().default('claude-opus-5-5'),
   })
   .superRefine((env, ctx) => {
     if (env.CLASSIFIER === 'jev' && !env.TYPESAFE_API_KEY) {
@@ -57,10 +62,18 @@ export type Config = Readonly<{
   host: string;
   port: number;
   logLevel: z.infer<typeof Env>['LOG_LEVEL'];
-  upstream: Readonly<{
+  primary: Readonly<{
     baseUrl: string;
     authMode: 'passthrough' | 'inject';
     apiKey: string | undefined;
+    timeoutMs: number;
+  }>;
+  cheap: Readonly<{
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    maxOutputTokens: number;
+    contextTokens: number;
     timeoutMs: number;
   }>;
   proxyAuthToken: string | undefined;
@@ -70,12 +83,13 @@ export type Config = Readonly<{
     | { kind: 'heuristic'; timeoutMs: number; maxChars: number }
   >;
   router: Readonly<{
-    threshold: number;
+    minCheapProbability: number;
+    standardRoute: Route;
     allowEscalation: boolean;
-    passthroughClasses: ReadonlySet<string>;
+    primaryClasses: ReadonlySet<string>;
+    failoverOnPrimaryRateLimit: boolean;
     sessionTtlMs: number;
     sessionMaxEntries: number;
-    models: Readonly<Record<Tier, string>>;
   }>;
 }>;
 
@@ -86,18 +100,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid configuration:\n${z.prettifyError(parsed.error)}`);
   }
   const e = parsed.data;
-
-  const models: Record<Tier, string> = { haiku: e.MODEL_HAIKU, sonnet: e.MODEL_SONNET, opus: e.MODEL_OPUS };
+  const trimSlash = (url: string) => url.replace(/\/+$/, '');
 
   return {
     host: e.HOST,
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
-    upstream: {
-      baseUrl: e.ANTHROPIC_UPSTREAM_URL.replace(/\/+$/, ''),
+    primary: {
+      baseUrl: trimSlash(e.ANTHROPIC_UPSTREAM_URL),
       authMode: e.UPSTREAM_AUTH_MODE,
       apiKey: e.ANTHROPIC_API_KEY,
       timeoutMs: e.UPSTREAM_TIMEOUT_MS,
+    },
+    cheap: {
+      baseUrl: trimSlash(e.CHEAP_BASE_URL),
+      apiKey: e.CHEAP_API_KEY,
+      model: e.CHEAP_MODEL,
+      maxOutputTokens: e.CHEAP_MAX_OUTPUT_TOKENS,
+      contextTokens: e.CHEAP_CONTEXT_TOKENS,
+      timeoutMs: e.CHEAP_TIMEOUT_MS,
     },
     proxyAuthToken: e.PROXY_AUTH_TOKEN,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
@@ -113,12 +134,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
           }
         : { kind: 'heuristic', timeoutMs: e.JEV_TIMEOUT_MS, maxChars: e.CLASSIFIER_MAX_CHARS },
     router: {
-      threshold: e.ROUTER_THRESHOLD,
+      minCheapProbability: e.ROUTER_MIN_CHEAP_PROBABILITY,
+      standardRoute: e.ROUTER_STANDARD_ROUTE,
       allowEscalation: e.ROUTER_ALLOW_ESCALATION,
-      passthroughClasses: e.ROUTER_PASSTHROUGH_CLASSES,
+      primaryClasses: e.ROUTER_PRIMARY_CLASSES,
+      failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,
       sessionTtlMs: e.SESSION_TTL_MS,
       sessionMaxEntries: e.SESSION_MAX_ENTRIES,
-      models,
     },
   };
 }

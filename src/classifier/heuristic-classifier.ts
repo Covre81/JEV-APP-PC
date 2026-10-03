@@ -1,4 +1,4 @@
-import type { TierScores } from '../domain/tiers.js';
+import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
 import type { ClassificationInput, ComplexityClassifier } from './classifier.js';
 
 /**
@@ -8,10 +8,10 @@ import type { ClassificationInput, ComplexityClassifier } from './classifier.js'
  * fixture in tests. It is NOT a substitute for JEV in production: keyword
  * matching has no notion of calibration and is trivially fooled.
  */
-const TRIVIAL =
+const SIMPLE =
   /\b(typo|rename|format|lint|explain|what (is|does)|how do i|list|print|comment|docstring|bump|changelog)\b/i;
-const HARD =
-  /\b(architect\w*|refactor\w*|design|race condition|deadlock|concurren\w*|security|vulnerab\w*|performance|optimi[sz]\w*|migrat\w*|distributed|root cause|algorithm\w*|trade-?offs?)\b/i;
+const STRUCTURAL =
+  /\b(architect\w*|clean architecture|solid|refactor\w*|design|race condition|deadlock|concurren\w*|security|vulnerab\w*|performance|optimi[sz]\w*|migrat\w*|root cause|trade-?offs?|test suite|fixtures?|mock\w*)\b/i;
 
 const LONG_PROMPT_CHARS = 2_000;
 const LARGE_CONTEXT_TOKENS = 100_000;
@@ -19,23 +19,16 @@ const LARGE_CONTEXT_TOKENS = 100_000;
 export class HeuristicClassifier implements ComplexityClassifier {
   readonly name = 'heuristic';
 
-  classify(input: ClassificationInput): Promise<TierScores> {
-    let haiku = 60;
-    let sonnet = 90;
+  classify(input: ClassificationInput): Promise<ComplexityDistribution> {
+    let simple = 3;
+    let standard = 5;
+    let structural = 2;
 
-    if (TRIVIAL.test(input.text)) haiku += 30;
-    if (HARD.test(input.text)) {
-      haiku -= 45;
-      sonnet -= 30;
-    }
-    if (input.text.length > LONG_PROMPT_CHARS) {
-      haiku -= 20;
-      sonnet -= 10;
-    }
-    if (input.estimatedInputTokens > LARGE_CONTEXT_TOKENS) haiku -= 30;
+    if (SIMPLE.test(input.text)) simple += 30;
+    if (STRUCTURAL.test(input.text)) structural += 30;
+    if (input.text.length > LONG_PROMPT_CHARS) structural += 5;
+    if (input.estimatedInputTokens > LARGE_CONTEXT_TOKENS) standard += 5;
 
-    const clamp = (n: number) => Math.min(100, Math.max(0, n));
-    const h = clamp(haiku);
-    return Promise.resolve({ haiku: h, sonnet: Math.max(h, clamp(sonnet)), opus: 100 });
+    return Promise.resolve(toDistribution(simple, standard, structural));
   }
 }
