@@ -1,8 +1,7 @@
-import { and, asc, eq, gte, sql, type SQL } from 'drizzle-orm';
-import { computeNetCost, type NetCost } from './cost.js';
+import { computeNetCost, type CostRow, type NetCost } from './cost.js';
 import type { TelemetryDb } from './db.js';
 import { pricingFromEnv, type Pricing } from './pricing.js';
-import { routerLogs, type FinalProvider } from './schema.js';
+import type { FinalProvider } from './schema.js';
 
 export interface ProviderStats {
   readonly requests: number;
@@ -48,23 +47,17 @@ const EMPTY: ProviderStats = { requests: 0, ok: 0, tokensIn: 0, tokensOut: 0, ca
 export function computeStats(db: TelemetryDb, options: StatsOptions = {}): RouterStats {
   const { since } = options;
   const pricing = options.pricing ?? pricingFromEnv({});
-  const window: SQL | undefined = since ? gte(routerLogs.createdAt, since) : undefined;
-  const where = (extra?: SQL) => (window && extra ? and(window, extra) : (window ?? extra));
+  const window = { since: since?.getTime() ?? null };
+  const WHERE = 'WHERE (@since IS NULL OR created_at >= @since)';
+  const all = <T>(sql: string) => db.prepare(sql).all(window) as T[];
+  const get = <T>(sql: string) => db.prepare(sql).get(window) as T;
 
-  const rows = db
-    .select({
-      provider: routerLogs.finalProvider,
-      requests: sql<number>`count(*)`,
-      ok: sql<number>`sum(case when ${routerLogs.outcome} = 'ok' then 1 else 0 end)`,
-      tokensIn: sql<number>`coalesce(sum(${routerLogs.tokensIn}), 0)`,
-      tokensOut: sql<number>`coalesce(sum(${routerLogs.tokensOut}), 0)`,
-      cacheReadTokens: sql<number>`coalesce(sum(${routerLogs.cacheReadTokens}), 0)`,
-      avgLatencyMs: sql<number | null>`avg(${routerLogs.latencyMs})`,
-    })
-    .from(routerLogs)
-    .where(where())
-    .groupBy(routerLogs.finalProvider)
-    .all();
+  const rows = all<{ provider: FinalProvider } & ProviderStats>(`
+    SELECT final_provider AS provider, count(*) AS requests,
+      sum(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END) AS ok,
+      coalesce(sum(tokens_in), 0) AS tokensIn, coalesce(sum(tokens_out), 0) AS tokensOut,
+      coalesce(sum(cache_read_tokens), 0) AS cacheReadTokens, avg(latency_ms) AS avgLatencyMs
+    FROM router_logs ${WHERE} GROUP BY final_provider`);
 
   const byProvider: Record<FinalProvider, ProviderStats> = { anthropic: EMPTY, openai: EMPTY };
   for (const r of rows) {
@@ -78,53 +71,36 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     };
   }
 
-  const summary = db
-    .select({
-      total: sql<number>`count(*)`,
-      firstAt: sql<number | null>`min(${routerLogs.createdAt})`,
-      lastAt: sql<number | null>`max(${routerLogs.createdAt})`,
-      classified: sql<number>`coalesce(sum(case when ${routerLogs.jevDecision} is not null then 1 else 0 end), 0)`,
-      fallbacks: sql<number>`coalesce(sum(${routerLogs.fallbackTriggered}), 0)`,
-      saved: sql<number>`coalesce(sum(case when ${routerLogs.finalProvider} = 'openai' and ${routerLogs.outcome} = 'ok'
-        then coalesce(${routerLogs.tokensIn}, 0) + coalesce(${routerLogs.tokensOut}, 0) else 0 end), 0)`,
-    })
-    .from(routerLogs)
-    .where(where())
-    .get()!;
+  const summary = get<{
+    total: number;
+    firstAt: number | null;
+    lastAt: number | null;
+    classified: number;
+    fallbacks: number;
+    saved: number;
+  }>(`
+    SELECT count(*) AS total, min(created_at) AS firstAt, max(created_at) AS lastAt,
+      coalesce(sum(CASE WHEN jev_decision IS NOT NULL THEN 1 ELSE 0 END), 0) AS classified,
+      coalesce(sum(fallback_triggered), 0) AS fallbacks,
+      coalesce(sum(CASE WHEN final_provider = 'openai' AND outcome = 'ok'
+        THEN coalesce(tokens_in, 0) + coalesce(tokens_out, 0) ELSE 0 END), 0) AS saved
+    FROM router_logs ${WHERE}`);
 
-  const cheapStreamErrors = db
-    .select({ n: sql<number>`count(*)` })
-    .from(routerLogs)
-    .where(where(and(eq(routerLogs.finalProvider, 'openai'), eq(routerLogs.outcome, 'stream_error'))))
-    .get()!.n;
+  const cheapStreamErrors = get<{ n: number }>(
+    `SELECT count(*) AS n FROM router_logs ${WHERE} AND final_provider = 'openai' AND outcome = 'stream_error'`,
+  ).n;
 
-  const repeats = db
-    .select({ hash: routerLogs.humanPromptHash, sends: sql<number>`count(*)`.as('sends') })
-    .from(routerLogs)
-    .where(where(sql`${routerLogs.humanPromptHash} is not null`))
-    .groupBy(routerLogs.humanPromptHash)
-    .having(sql`count(*) > 1`)
-    .all();
+  const repeats = all<{ sends: number }>(`
+    SELECT count(*) AS sends FROM router_logs ${WHERE} AND human_prompt_hash IS NOT NULL
+    GROUP BY human_prompt_hash HAVING count(*) > 1`);
 
   // With --since, a session whose earlier turns fall outside the window starts
   // fresh: a cheap → Anthropic transition across the boundary is not penalized.
-  const costRows = db
-    .select({
-      id: routerLogs.id,
-      sessionId: routerLogs.sessionId,
-      finalProvider: routerLogs.finalProvider,
-      model: routerLogs.model,
-      requestedModel: routerLogs.requestedModel,
-      outcome: routerLogs.outcome,
-      tokensIn: routerLogs.tokensIn,
-      tokensOut: routerLogs.tokensOut,
-      cacheReadTokens: routerLogs.cacheReadTokens,
-      cacheWriteTokens: routerLogs.cacheWriteTokens,
-    })
-    .from(routerLogs)
-    .where(where())
-    .orderBy(asc(routerLogs.id))
-    .all();
+  const costRows = all<CostRow>(`
+    SELECT id, session_id AS sessionId, final_provider AS finalProvider, model, requested_model AS requestedModel,
+      outcome, tokens_in AS tokensIn, tokens_out AS tokensOut, cache_read_tokens AS cacheReadTokens,
+      cache_write_tokens AS cacheWriteTokens
+    FROM router_logs ${WHERE} ORDER BY id`);
 
   return {
     since: since ?? null,

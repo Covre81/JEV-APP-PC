@@ -1,6 +1,3 @@
-import { sql } from 'drizzle-orm';
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
-
 /** JEV's System One verdict for the turn that set the route (null when JEV was not consulted). */
 export interface JevDecision {
   /** Full distribution over the three ordinal levels. */
@@ -26,46 +23,93 @@ export type FinalProvider = 'anthropic' | 'openai';
  */
 export type Outcome = 'ok' | 'http_error' | 'stream_error' | 'client_abort' | 'proxy_error';
 
-/** One row per `/v1/messages` exchange routed by jev-router. */
-export const routerLogs = sqliteTable(
-  'router_logs',
-  {
-    id: integer('id').primaryKey({ autoIncrement: true }),
-    createdAt: integer('created_at', { mode: 'timestamp_ms' })
-      .notNull()
-      .default(sql`(unixepoch('subsec') * 1000)`),
-    /** Conversation key: `<x-claude-code-session-id>:<agent>` or a body fingerprint. */
-    sessionId: text('session_id'),
-    /** sha256 of the latest human-typed text; null on tool-result continuations. */
-    humanPromptHash: text('human_prompt_hash'),
-    jevDecision: text('jev_decision', { mode: 'json' }).$type<JevDecision>(),
-    finalProvider: text('final_provider', { enum: ['anthropic', 'openai'] }).notNull(),
-    /** Model that served the request (the cheap model on the cheap route). */
-    model: text('model'),
-    /** Model the client asked for: what Anthropic would have run had the request stayed there. */
-    requestedModel: text('requested_model'),
-    routeReason: text('route_reason').notNull(),
-    requestClass: text('request_class'),
-    httpStatus: integer('http_status'),
-    outcome: text('outcome', { enum: ['ok', 'http_error', 'stream_error', 'client_abort', 'proxy_error'] }).notNull(),
-    /** Total prompt tokens, cache reads and writes included (null when the response carried no usage). */
-    tokensIn: integer('tokens_in'),
-    tokensOut: integer('tokens_out'),
-    /** Portion of tokens_in served from the Anthropic prompt cache. */
-    cacheReadTokens: integer('cache_read_tokens'),
-    /** Portion of tokens_in written to the Anthropic prompt cache. */
-    cacheWriteTokens: integer('cache_write_tokens'),
-    /** Request received → last byte sent to the client. */
-    latencyMs: integer('latency_ms').notNull(),
-    /** The cheap provider failed before answering and the request fell back to Anthropic. */
-    fallbackTriggered: integer('fallback_triggered', { mode: 'boolean' }).notNull().default(false),
-  },
-  (t) => [
-    index('router_logs_created_at_idx').on(t.createdAt),
-    index('router_logs_session_id_idx').on(t.sessionId),
-    index('router_logs_prompt_hash_idx').on(t.humanPromptHash),
-  ],
-);
+/** One `router_logs` row per `/v1/messages` exchange routed by jev-router. */
+export interface RouterLog {
+  readonly createdAt: Date;
+  /** Conversation key: `<x-claude-code-session-id>:<agent>` or a body fingerprint. */
+  readonly sessionId: string | null;
+  /** sha256 of the latest human-typed text; null on tool-result continuations. */
+  readonly humanPromptHash: string | null;
+  readonly jevDecision: JevDecision | null;
+  readonly finalProvider: FinalProvider;
+  /** Model that served the request (the cheap model on the cheap route). */
+  readonly model: string | null;
+  /** Model the client asked for: what Anthropic would have run had the request stayed there. */
+  readonly requestedModel: string | null;
+  readonly routeReason: string;
+  readonly requestClass: string | null;
+  readonly httpStatus: number | null;
+  readonly outcome: Outcome;
+  /** Total prompt tokens, cache reads and writes included (null when the response carried no usage). */
+  readonly tokensIn: number | null;
+  readonly tokensOut: number | null;
+  /** Portion of tokens_in served from the Anthropic prompt cache. */
+  readonly cacheReadTokens: number | null;
+  /** Portion of tokens_in written to the Anthropic prompt cache. */
+  readonly cacheWriteTokens: number | null;
+  /** Request received → last byte sent to the client. */
+  readonly latencyMs: number;
+  /** The cheap provider failed before answering and the request fell back to Anthropic. */
+  readonly fallbackTriggered: boolean;
+}
 
-export type RouterLog = typeof routerLogs.$inferSelect;
-export type NewRouterLog = typeof routerLogs.$inferInsert;
+export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
+  Partial<RouterLog>;
+
+/** Applied in order on boot; `PRAGMA user_version` records how many have run. Append only. */
+export const MIGRATIONS: readonly string[] = [
+  `CREATE TABLE router_logs (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
+    session_id text,
+    human_prompt_hash text,
+    jev_decision text,
+    final_provider text NOT NULL,
+    model text,
+    route_reason text NOT NULL,
+    request_class text,
+    http_status integer,
+    outcome text NOT NULL,
+    tokens_in integer,
+    tokens_out integer,
+    cache_read_tokens integer,
+    latency_ms integer NOT NULL,
+    fallback_triggered integer DEFAULT false NOT NULL
+  );
+  CREATE INDEX router_logs_created_at_idx ON router_logs (created_at);
+  CREATE INDEX router_logs_session_id_idx ON router_logs (session_id);
+  CREATE INDEX router_logs_prompt_hash_idx ON router_logs (human_prompt_hash);`,
+  `ALTER TABLE router_logs ADD requested_model text;
+  ALTER TABLE router_logs ADD cache_write_tokens integer;`,
+];
+
+export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
+  created_at, session_id, human_prompt_hash, jev_decision, final_provider, model, requested_model, route_reason,
+  request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
+  fallback_triggered
+) VALUES (
+  @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
+  @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
+  @fallbackTriggered
+)`;
+
+/** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
+export const insertParams = (r: NewRouterLog) => ({
+  createdAt: r.createdAt.getTime(),
+  sessionId: r.sessionId ?? null,
+  humanPromptHash: r.humanPromptHash ?? null,
+  jevDecision: r.jevDecision ? JSON.stringify(r.jevDecision) : null,
+  finalProvider: r.finalProvider,
+  model: r.model ?? null,
+  requestedModel: r.requestedModel ?? null,
+  routeReason: r.routeReason,
+  requestClass: r.requestClass ?? null,
+  httpStatus: r.httpStatus ?? null,
+  outcome: r.outcome,
+  tokensIn: r.tokensIn ?? null,
+  tokensOut: r.tokensOut ?? null,
+  cacheReadTokens: r.cacheReadTokens ?? null,
+  cacheWriteTokens: r.cacheWriteTokens ?? null,
+  latencyMs: r.latencyMs,
+  fallbackTriggered: r.fallbackTriggered ? 1 : 0,
+});

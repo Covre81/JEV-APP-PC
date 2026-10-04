@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import Database from 'better-sqlite3';
 import { openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
-import type { NewRouterLog } from '../src/telemetry/schema.js';
+import { MIGRATIONS, type NewRouterLog } from '../src/telemetry/schema.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
 
 const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
@@ -56,14 +60,35 @@ describe('telemetry → stats', () => {
     const db = openTelemetryDb(':memory:');
     const errors: unknown[] = [];
     const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000, onError: (e) => errors.push(e) });
-    db.$client.exec('ALTER TABLE router_logs RENAME TO router_logs_tmp');
+    db.exec('ALTER TABLE router_logs RENAME TO router_logs_tmp');
     sink.record(row({}));
     sink.flush();
     assert.equal(errors.length, 1);
-    db.$client.exec('ALTER TABLE router_logs_tmp RENAME TO router_logs');
+    db.exec('ALTER TABLE router_logs_tmp RENAME TO router_logs');
     sink.flush();
     assert.equal(computeStats(db).total, 1);
     await sink.close();
+  });
+
+  it('upgrades a database migrated by drizzle without re-running its migrations', async () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'jev-telemetry-')), 'telemetry.db');
+    const old = new Database(path);
+    old.exec(MIGRATIONS[0]!);
+    old.exec('CREATE TABLE __drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)');
+    old.exec(`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('f8bc9d56', 1791066394899)`);
+    old.exec(`INSERT INTO router_logs (final_provider, route_reason, outcome, latency_ms) VALUES ('openai', 'classified', 'ok', 5)`);
+    old.close();
+
+    const db = openTelemetryDb(path);
+    assert.equal(db.pragma('user_version', { simple: true }), MIGRATIONS.length);
+    const columns = (db.pragma('table_info(router_logs)') as { name: string }[]).map((c) => c.name);
+    assert.ok(columns.includes('requested_model') && columns.includes('cache_write_tokens'));
+    assert.equal(computeStats(db).total, 1, 'existing rows survive');
+    db.close();
+
+    const reopened = openTelemetryDb(path);
+    assert.equal(computeStats(reopened).total, 1, 'reopening applies nothing twice');
+    reopened.close();
   });
 
   it('parses --since spans', () => {

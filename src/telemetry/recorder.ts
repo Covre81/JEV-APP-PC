@@ -1,5 +1,5 @@
 import type { TelemetryDb } from './db.js';
-import { routerLogs, type NewRouterLog } from './schema.js';
+import { INSERT_ROUTER_LOG, insertParams, type NewRouterLog } from './schema.js';
 
 /** Port: where routing telemetry goes. `record` must never block or throw. */
 export interface TelemetrySink {
@@ -57,9 +57,10 @@ export class SqliteTelemetry implements TelemetrySink {
     const batch = this.queue;
     this.queue = [];
     try {
-      this.db.transaction((tx) => {
-        for (const row of batch) tx.insert(routerLogs).values(row).run();
-      });
+      const insert = this.db.prepare(INSERT_ROUTER_LOG);
+      this.db.transaction(() => {
+        for (const row of batch) insert.run(insertParams(row));
+      })();
     } catch (err) {
       // Keep the rows for the next tick (disk full, database locked, …).
       this.queue = batch.concat(this.queue).slice(-this.maxQueued);
@@ -72,6 +73,6 @@ export class SqliteTelemetry implements TelemetrySink {
     this.closed = true;
     clearInterval(this.timer);
     this.flush();
-    this.db.$client.close();
+    this.db.close();
   }
 }

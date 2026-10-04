@@ -67,7 +67,7 @@ async function main(argv: string[]): Promise<number> {
         });
         console.log(values.json ? JSON.stringify(stats, null, 2) : renderStats(stats));
       } finally {
-        db.$client.close();
+        db.close();
       }
       return 0;
     }

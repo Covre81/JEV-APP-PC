@@ -15,7 +15,7 @@ import { Router } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
 import { openTelemetryDb, type TelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
-import { routerLogs, type RouterLog } from '../src/telemetry/schema.js';
+import type { RouterLog } from '../src/telemetry/schema.js';
 
 interface Seen {
   method: string;
@@ -244,7 +244,29 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     for (let i = 0; i < 20; i++) {
       await sleep(10);
       telemetry.flush();
-      const rows = db.select().from(routerLogs).all().filter((r) => r.sessionId?.startsWith(`${sessionId}:`));
+      const rows = (
+        db.prepare(`SELECT * FROM router_logs WHERE session_id LIKE ? ORDER BY id`).all(`${sessionId}:%`) as Record<string, any>[]
+      ).map(
+        (r): RouterLog => ({
+          createdAt: new Date(r.created_at),
+          sessionId: r.session_id,
+          humanPromptHash: r.human_prompt_hash,
+          jevDecision: r.jev_decision === null ? null : JSON.parse(r.jev_decision),
+          finalProvider: r.final_provider,
+          model: r.model,
+          requestedModel: r.requested_model,
+          routeReason: r.route_reason,
+          requestClass: r.request_class,
+          httpStatus: r.http_status,
+          outcome: r.outcome,
+          tokensIn: r.tokens_in,
+          tokensOut: r.tokens_out,
+          cacheReadTokens: r.cache_read_tokens,
+          cacheWriteTokens: r.cache_write_tokens,
+          latencyMs: r.latency_ms,
+          fallbackTriggered: r.fallback_triggered === 1,
+        }),
+      );
       if (rows.length > 0) return rows;
     }
     return [];
