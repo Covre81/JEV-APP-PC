@@ -339,3 +339,96 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(cheapLog.length, 0);
   });
 });
+
+describe('inject mode: the proxy holds the Anthropic key and gates clients with PROXY_AUTH_TOKEN', () => {
+  const PROXY_TOKEN = 'proxy-token-0123456789';
+  let anthropic: { server: Server; url: string };
+  let proxy: FastifyInstance;
+  let proxyUrl: string;
+  const anthropicLog: Seen[] = [];
+
+  before(async () => {
+    anthropic = await fakeServer(() => anthropicOk, anthropicLog);
+    const config = loadConfig({
+      CLASSIFIER: 'heuristic',
+      ANTHROPIC_UPSTREAM_URL: anthropic.url,
+      UPSTREAM_AUTH_MODE: 'inject',
+      ANTHROPIC_API_KEY: 'sk-ant-proxy-test',
+      PROXY_AUTH_TOKEN: PROXY_TOKEN,
+      CHEAP_API_KEY: 'unused',
+      LOG_LEVEL: 'fatal',
+    });
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+      policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
+      primaryClasses: config.router.primaryClasses,
+      cheapContextTokens: 100_000,
+      classifierTimeoutMs: 1_000,
+      classifierMaxChars: 4_000,
+    });
+    proxy = buildServer({
+      config,
+      router,
+      providers: { primary: new AnthropicProvider(config.primary), cheap: new OpenAICompatibleProvider(config.cheap) },
+    });
+    await proxy.listen({ host: '127.0.0.1', port: 0 });
+    proxyUrl = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
+  });
+
+  after(async () => {
+    await proxy.close();
+    anthropic.server.close();
+  });
+
+  beforeEach(() => void (anthropicLog.length = 0));
+
+  // Structural work stays primary, so the request reaches the fake Anthropic.
+  const send = (headers: Record<string, string>) =>
+    request(`${proxyUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', ...headers },
+      body: JSON.stringify({
+        model: 'claude-opus-5-5',
+        max_tokens: 1024,
+        stream: true,
+        messages: [{ role: 'user', content: 'refactor the data layer to clean architecture' }],
+      }),
+    });
+
+  it('rejects a request without the proxy token before it reaches Anthropic', async () => {
+    const res = await send({});
+    assert.equal(res.statusCode, 401);
+    assert.deepEqual(await res.body.json(), {
+      type: 'error',
+      error: { type: 'authentication_error', message: 'invalid proxy token' },
+    });
+    assert.equal(anthropicLog.length, 0);
+  });
+
+  it('rejects a wrong token, including a client-side Anthropic key', async () => {
+    for (const headers of [{ 'x-api-key': 'proxy-token-WRONG-6789' }, { 'x-api-key': 'sk-ant-client' }]) {
+      const res = await send(headers);
+      await res.body.dump();
+      assert.equal(res.statusCode, 401);
+    }
+    assert.equal(anthropicLog.length, 0);
+  });
+
+  it('replaces the client credential with the proxy key, from either header', async () => {
+    for (const headers of [{ 'x-api-key': PROXY_TOKEN }, { authorization: `Bearer ${PROXY_TOKEN}` }]) {
+      const res = await send(headers);
+      await res.body.text();
+      assert.equal(res.statusCode, 200);
+    }
+    assert.equal(anthropicLog.length, 2);
+    for (const seen of anthropicLog) {
+      assert.equal(seen.headers['x-api-key'], 'sk-ant-proxy-test');
+      assert.equal(seen.headers.authorization, undefined, 'the proxy token never reaches Anthropic');
+    }
+  });
+
+  it('leaves /healthz open', async () => {
+    const res = await request(`${proxyUrl}/healthz`);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(await res.body.json(), { ok: true });
+  });
+});
