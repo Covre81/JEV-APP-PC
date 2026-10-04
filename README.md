@@ -330,3 +330,40 @@ Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:
 SELECT session_id FROM router_logs GROUP BY session_id
 HAVING min(final_provider) = 'anthropic' AND max(final_provider) = 'openai';
 ```
+
+## Checks against real APIs (local only)
+
+CI runs only the offline suite (`npm test`: every upstream is a local fake).
+Two scripts call real services and are meant to be run by hand. Both read the
+same env files as the CLI (`--env <file>`, else `./.env`, else
+`~/.jev-router/.env`).
+
+**JEV contract**: one `POST /v1/systemone` with a minimal prompt. Prints the
+raw body, then checks it strictly against the adapter's schema (levels
+`0`/`1`/`2` present, summing to 1). Exit 0 = contract holds.
+
+```bash
+npx tsx scripts/test-jev-real.ts
+```
+
+**Cheap-model tool benchmark**: runs Read/Edit tasks (fix a bug, rename across
+two files, read a value) through the real `OpenAICompatibleProvider`, in an
+in-memory workspace with Claude Code's tool shapes and rules (absolute paths,
+read before edit, unique `old_string`, unknown parameters rejected). Each
+trial ends as:
+
+| Outcome | What the router would see |
+|---|---|
+| `success` | Task verified |
+| `wrong_result` / `max_steps` | Protocol fine, work wrong: silent quality loss |
+| `fallback` | Refused before the first byte: the turn goes to Anthropic |
+| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): Claude Code shows an error |
+| `truncated` | `max_tokens` or refusal |
+
+```bash
+npx tsx scripts/bench.ts --trials 5 --pad-kb 32
+npx tsx scripts/bench.ts --task rename --model llama3.1:latest --json
+```
+
+`--pad-kb` grows the system prompt toward Claude Code's real context size.
+Exit 0 when the success rate reaches `--min-success` (default 0.8).
