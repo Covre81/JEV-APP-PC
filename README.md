@@ -396,3 +396,11 @@ npx tsx scripts/smoke-anthropic.ts --model claude-haiku-4-5
 Groq and OpenRouter are both OpenAI-compatible: point `CHEAP_BASE_URL` /
 `CHEAP_API_KEY` / `CHEAP_MODEL` at either one and run `bench.ts`, which already
 streams through the real SSE translation.
+
+### Bench history
+
+Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MODEL`, and add a row.
+
+| Date | Model | Trials | Success | Provider failures | Avg trial | Notes |
+|---|---|---|---|---|---|---|
+| 2026-10-04 | `gpt-oss:20b-cloud` | 15 (pad 32 KB, 12 steps) | 93% | 7% (1 `stream_error`) | 6.7 s | 25 schema errors, mostly `Read` with `offset: 0`. A separate 45-trial capture: 0 `stream_error`, 1 `rename` `wrong_result` (import not updated). |
