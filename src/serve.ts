@@ -11,6 +11,11 @@ import { TtlLruStore } from './routing/session-store.js';
 import { openTelemetryDb } from './telemetry/db.js';
 import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/recorder.js';
 
+// ponytail: fixed cap, one entry per live conversation. An evicted cheap
+// conversation is treated as unknown and goes primary: savings lost, never
+// correctness. Raise it only if `stats` shows that under heavy parallel use.
+const SESSION_MAX_ENTRIES = 10_000;
+
 /** Composition root: the only place that knows concrete implementations. */
 export async function serve(config: Config): Promise<void> {
   const classifier: ComplexityClassifier =
@@ -24,7 +29,7 @@ export async function serve(config: Config): Promise<void> {
 
   const router = new Router(
     classifier,
-    new TtlLruStore<Route>(10_000, config.router.sessionTtlMs),
+    new TtlLruStore<Route>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
     {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
