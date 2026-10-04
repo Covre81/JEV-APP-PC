@@ -345,6 +345,24 @@ SELECT session_id FROM router_logs GROUP BY session_id
 HAVING min(final_provider) = 'anthropic' AND max(final_provider) = 'openai';
 ```
 
+The cheap route can also fail silently: the model says it is done and the work
+is wrong. The user's tell is sending the same prompt again. Compare that rate
+per provider; if `openai` sits well above `anthropic`, raise the bar further or
+try another model with `bench.ts`:
+
+```sql
+-- Prompts repeated after an answer, by the provider that served the first send.
+WITH firsts AS (
+  SELECT human_prompt_hash, final_provider,
+         count(*) OVER (PARTITION BY human_prompt_hash) AS sends,
+         row_number() OVER (PARTITION BY human_prompt_hash ORDER BY id) AS nth
+  FROM router_logs WHERE human_prompt_hash IS NOT NULL
+)
+SELECT final_provider, count(*) AS prompts, sum(sends > 1) AS repeated,
+       round(100.0 * sum(sends > 1) / count(*), 1) AS repeated_pct
+FROM firsts WHERE nth = 1 GROUP BY final_provider;
+```
+
 ## Checks against real APIs (local only)
 
 CI runs only the offline suite (`npm test`: every upstream is a local fake).
