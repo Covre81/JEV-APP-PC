@@ -53,7 +53,9 @@ only on work that needs Claude**.
    - The cheap provider returns an error or times out: primary, and the
      conversation is pinned there.
    - The cheap provider breaks mid-stream: an Anthropic `error` event is sent,
-     the conversation is pinned to primary, and Claude Code retries.
+     the conversation is pinned to primary, and Claude Code retries (2.1.289
+     re-sends the turn as a non-streaming request). The pin does not cover a
+     break on a conversation's first turn: that retry is re-classified.
    - JEV fails or times out: primary.
 5. **Quota failover in the other direction is opt-in**
    (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`). When Anthropic answers 429 or 529,
@@ -369,7 +371,7 @@ trial ends as:
 | `success` | Task verified |
 | `wrong_result` / `max_steps` | Protocol fine, work wrong: silent quality loss |
 | `fallback` | Refused before the first byte: the turn goes to Anthropic |
-| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): Claude Code shows an error |
+| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event, Claude Code retries and the retry goes to Anthropic |
 | `truncated` | `max_tokens` or refusal |
 
 ```bash

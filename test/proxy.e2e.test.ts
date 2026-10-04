@@ -65,6 +65,12 @@ const openAiStream: Handler = async (_seen, res) => {
   res.end('data: [DONE]\n\n');
 };
 
+/** What Ollama sends when it fails mid-generation: content, then EOF with no finish_reason and no [DONE]. */
+const openAiCutMidStream: Handler = (_seen, res) => {
+  res.writeHead(200, { 'content-type': 'text/event-stream' });
+  res.end('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
+};
+
 const openAi503: Handler = (_seen, res) => {
   res.writeHead(503, { 'content-type': 'application/json' }).end('{"error":{"message":"over capacity"}}');
 };
@@ -127,7 +133,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     cheapHandler = openAiStream;
   });
 
-  const claudeCode = (sessionId: string, text: string) =>
+  const claudeCode = (sessionId: string, text: string, messages: object[] = [{ role: 'user', content: [{ type: 'text', text }] }]) =>
     request(`${proxyUrl}/v1/messages?beta=true`, {
       method: 'POST',
       headers: {
@@ -143,7 +149,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
         max_tokens: 64_000,
         stream: true,
         system: [{ type: 'text', text: 'You are Claude Code' }],
-        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+        messages,
       }),
     });
 
@@ -189,6 +195,28 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     await res.body.text();
     assert.equal(res.statusCode, 200);
     assert.equal(res.headers['x-jev-route'], 'primary; reason=failover:cheap-unavailable');
+    assert.equal(anthropicLog.length, 1);
+  });
+
+  it('ends a stream cut mid-way with an error event and sends Claude Code’s retry to Anthropic', async () => {
+    await (await claudeCode('S-cut', 'fix the typo')).body.text();
+    const toolLoop = [
+      { role: 'user', content: [{ type: 'text', text: 'fix the typo' }] },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/r/README.md' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Teh readme' }] },
+    ];
+
+    cheapHandler = openAiCutMidStream;
+    const broken = await claudeCode('S-cut', '', toolLoop);
+    const text = await broken.body.text();
+    assert.equal(broken.headers['x-jev-route'], 'cheap; reason=sticky');
+    assert.match(text, /event: error\ndata: \{"type":"error","error":\{"type":"api_error"/);
+
+    // Claude Code re-sends the same turn (verified on 2.1.289: as a non-streaming request).
+    const retry = await claudeCode('S-cut', '', toolLoop);
+    await retry.body.text();
+    assert.equal(retry.headers['x-jev-route'], 'primary; reason=sticky');
+    assert.equal(cheapLog.length, 2, 'the cheap provider is not tried again');
     assert.equal(anthropicLog.length, 1);
   });
 
