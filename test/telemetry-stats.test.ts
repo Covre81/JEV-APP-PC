@@ -41,12 +41,14 @@ describe('telemetry → stats', () => {
     assert.equal(all.repeatedSends, 1);
     assert.equal(all.estimatedTokensSaved, 1750, 'only cheap requests served OK count');
 
-    const recent = computeStats(db, new Date('2026-09-15T00:00:00Z'));
+    const recent = computeStats(db, { since: new Date('2026-09-15T00:00:00Z') });
     assert.equal(recent.total, 4);
 
     const text = renderStats(all);
     assert.match(text, /Requests\s+5/);
     assert.match(text, /Estimated Anthropic tokens saved\s+1,750/);
+    assert.match(text, /NET \((PROFIT|LOSS)\)/);
+    assert.match(text, /Cheap provider priced at \$0/);
     await sink.close();
   });
 

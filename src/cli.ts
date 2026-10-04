@@ -70,13 +70,18 @@ async function main(argv: string[]): Promise<number> {
         console.error(`No telemetry database at ${dbPath}. Start the gateway with \`jev-router serve\` first.`);
         return 1;
       }
-      const [{ openTelemetryDb }, { computeStats, parseSince, renderStats }] = await Promise.all([
+      const [{ openTelemetryDb }, { computeStats, parseSince, renderStats }, { pricingFromEnv }] = await Promise.all([
         import('./telemetry/db.js'),
         import('./telemetry/stats.js'),
+        import('./telemetry/pricing.js'),
       ]);
-      const db = openTelemetryDb(dbPath, { readonly: true });
+      // Writable on purpose: applies pending migrations if the gateway has not run since an upgrade.
+      const db = openTelemetryDb(dbPath);
       try {
-        const stats = computeStats(db, values.since ? parseSince(values.since) : undefined);
+        const stats = computeStats(db, {
+          ...(values.since ? { since: parseSince(values.since) } : {}),
+          pricing: pricingFromEnv(),
+        });
         console.log(values.json ? JSON.stringify(stats, null, 2) : renderStats(stats));
       } finally {
         db.$client.close();

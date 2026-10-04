@@ -1,5 +1,7 @@
-import { and, eq, gte, sql, type SQL } from 'drizzle-orm';
+import { and, asc, eq, gte, sql, type SQL } from 'drizzle-orm';
+import { computeNetCost, type NetCost } from './cost.js';
 import type { TelemetryDb } from './db.js';
+import { pricingFromEnv, type Pricing } from './pricing.js';
 import { routerLogs, type FinalProvider } from './schema.js';
 
 export interface ProviderStats {
@@ -31,11 +33,21 @@ export interface RouterStats {
    * quota: in + out tokens of requests the cheap provider served successfully.
    */
   readonly estimatedTokensSaved: number;
+  /** Dollar view: actual spend versus the all-Anthropic baseline, cache-miss penalty included. */
+  readonly cost: NetCost;
+  readonly cheapPriceUnset: boolean;
+}
+
+export interface StatsOptions {
+  readonly since?: Date;
+  readonly pricing?: Pricing;
 }
 
 const EMPTY: ProviderStats = { requests: 0, ok: 0, tokensIn: 0, tokensOut: 0, cacheReadTokens: 0, avgLatencyMs: null };
 
-export function computeStats(db: TelemetryDb, since?: Date): RouterStats {
+export function computeStats(db: TelemetryDb, options: StatsOptions = {}): RouterStats {
+  const { since } = options;
+  const pricing = options.pricing ?? pricingFromEnv({});
   const window: SQL | undefined = since ? gte(routerLogs.createdAt, since) : undefined;
   const where = (extra?: SQL) => (window && extra ? and(window, extra) : (window ?? extra));
 
@@ -94,6 +106,26 @@ export function computeStats(db: TelemetryDb, since?: Date): RouterStats {
     .having(sql`count(*) > 1`)
     .all();
 
+  // With --since, a session whose earlier turns fall outside the window starts
+  // fresh: a cheap → Anthropic transition across the boundary is not penalized.
+  const costRows = db
+    .select({
+      id: routerLogs.id,
+      sessionId: routerLogs.sessionId,
+      finalProvider: routerLogs.finalProvider,
+      model: routerLogs.model,
+      requestedModel: routerLogs.requestedModel,
+      outcome: routerLogs.outcome,
+      tokensIn: routerLogs.tokensIn,
+      tokensOut: routerLogs.tokensOut,
+      cacheReadTokens: routerLogs.cacheReadTokens,
+      cacheWriteTokens: routerLogs.cacheWriteTokens,
+    })
+    .from(routerLogs)
+    .where(where())
+    .orderBy(asc(routerLogs.id))
+    .all();
+
   return {
     since: since ?? null,
     firstAt: summary.firstAt === null ? null : new Date(summary.firstAt),
@@ -106,6 +138,8 @@ export function computeStats(db: TelemetryDb, since?: Date): RouterStats {
     repeatedPrompts: repeats.length,
     repeatedSends: repeats.reduce((n, r) => n + r.sends - 1, 0),
     estimatedTokensSaved: summary.saved,
+    cost: computeNetCost(costRows, pricing),
+    cheapPriceUnset: pricing.cheapPriceUnset,
   };
 }
 
@@ -164,14 +198,39 @@ export function renderStats(s: RouterStats): string {
     ]),
   ]);
 
+  const c = s.cost;
+  const money = (n: number) => `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(4)}`;
+  const verdict = c.netUsd >= 0 ? 'PROFIT' : 'LOSS';
+  const costs = table([
+    ['Net cost (USD, API list prices)', ''],
+    ['All-Anthropic baseline (warm cache)', money(c.baselineUsd)],
+    ['Actual: Anthropic', money(c.anthropicUsd)],
+    ['Actual: cheap provider', money(c.cheapUsd)],
+    ['Gross savings (cheap requests served OK)', money(c.grossSavingsUsd)],
+    [`Cache-miss penalty (${fmt(c.transitions)} cheap → Anthropic returns)`, money(-c.cachePenaltyUsd)],
+    ['Failed cheap attempts (paid, then redone)', money(-c.failedCheapUsd)],
+    [`NET (${verdict})`, money(c.netUsd)],
+  ]);
+  const warnings = [
+    ...(s.cheapPriceUnset
+      ? ['! Cheap provider priced at $0: set CHEAP_PRICE_INPUT_PER_MTOK / CHEAP_PRICE_OUTPUT_PER_MTOK (leave unset only for local models).']
+      : []),
+    ...(c.unpricedModels.length > 0 ? [`! No list price for ${c.unpricedModels.join(', ')}: priced at $0, set PRIMARY_PRICE_*.`] : []),
+    ...(c.rowsWithoutUsage > 0 ? [`! ${fmt(c.rowsWithoutUsage)} requests carried no token usage and count as $0.`] : []),
+  ];
+
   return [
     overview,
     '',
     providers,
     '',
+    costs,
+    ...(warnings.length > 0 ? ['', ...warnings] : []),
+    '',
     `Window: ${span}`,
     'Tokens saved = tokens in + out of requests the cheap provider served OK. Estimate:',
     "the cheap model's tokenizer differs from Claude's, and on Anthropic part of that",
     'input would have been a cache read. Rows without usage count as 0.',
+    'Dollars are API-equivalent: on a claude.ai subscription they measure quota, not a bill.',
   ].join('\n');
 }

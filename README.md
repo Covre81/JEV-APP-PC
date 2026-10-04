@@ -290,12 +290,34 @@ stay queued and the response is unaffected.
 
 **`jev-router stats`** prints the total requests, how many were diverted from
 Anthropic, fallbacks, repeated prompts, tokens per provider and the
-**estimated Anthropic tokens saved**: tokens in + out of the requests the
-cheap provider served successfully. It is an estimate:
+**net cost in dollars**, which says whether routing is making or losing money.
 
-- the cheap model's tokenizer is not Claude's;
-- on Anthropic, part of that input would have been a cheaper cache read;
-- requests whose response carried no `usage` count as 0.
+The net cost is measured against a **baseline**: the same traffic sent to
+Anthropic with a warm prompt cache. For each turn, the history the previous
+turn already sent is billed as a cache read, and only the new tokens are
+billed as a cache write.
+
+| Line | How it is computed |
+|---|---|
+| Gross savings | For each request the cheap provider served: warm Anthropic cost minus cheap cost |
+| Cache-miss penalty | First Anthropic request after a cheap one (escalation or fallback): actual cost minus warm cost. Anthropic re-reads the whole history at full input + write price because the cheap turns broke the cache |
+| Failed cheap attempts | Tokens billed by the cheap provider on requests that then fell back |
+| **NET** | baseline − (actual Anthropic + actual cheap). Positive = **PROFIT**, negative = **LOSS** |
+
+Prices: Anthropic list prices per model (built-in table, override with
+`PRIMARY_PRICE_*`). The cheap provider price defaults to $0, which is right
+only for a local model; set `CHEAP_PRICE_INPUT_PER_MTOK` and
+`CHEAP_PRICE_OUTPUT_PER_MTOK` for Groq or OpenRouter, otherwise `stats` warns.
+On a Claude subscription the dollars are API-equivalent quota, not a bill.
+
+Known limits:
+
+- the cheap model's tokenizer is not Claude's, so its token counts are only
+  close to what Anthropic would have counted;
+- rows logged before the `cache_write_tokens` column existed are priced as if
+  they had no cache writes;
+- requests whose response carried no `usage` are counted and reported, but
+  priced at $0.
 
 Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:
 
