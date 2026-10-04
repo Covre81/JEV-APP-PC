@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Also runs `prepare` (tsc build), so a broken build fails here.
+      - run: npm ci
+      - run: npm run typecheck
+      # Offline suite only: every upstream (Anthropic, cheap provider, JEV) is a local fake.
+      # Real-API checks live in scripts/ and never run in CI.
+      - run: npm test
