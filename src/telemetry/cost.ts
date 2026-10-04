@@ -13,6 +13,9 @@ export interface CostRow {
   readonly tokensOut: number | null;
   readonly cacheReadTokens: number | null;
   readonly cacheWriteTokens: number | null;
+  /** Tokens the JEV classification of this turn billed (null when JEV was not called). */
+  readonly jevTokensIn: number | null;
+  readonly jevTokensOut: number | null;
 }
 
 export interface NetCost {
@@ -28,7 +31,9 @@ export interface NetCost {
   readonly cachePenaltyUsd: number;
   /** Cheap requests that failed (stream error, client abort…): paid for, then redone on Anthropic. */
   readonly failedCheapUsd: number;
-  /** baseline − (anthropic + cheap). Positive = profit, negative = loss. */
+  /** What the JEV classifier billed: the router's own overhead. */
+  readonly jevUsd: number;
+  /** baseline − (anthropic + cheap + jev). Positive = profit, negative = loss. */
   readonly netUsd: number;
   /** cheap → Anthropic transitions that paid the cache-miss penalty. */
   readonly transitions: number;
@@ -70,6 +75,7 @@ export function computeNetCost(rows: readonly CostRow[], pricing: Pricing): NetC
   let grossSavingsUsd = 0;
   let cachePenaltyUsd = 0;
   let failedCheapUsd = 0;
+  let jevUsd = 0;
   let transitions = 0;
   let rowsWithoutUsage = 0;
 
@@ -91,6 +97,7 @@ export function computeNetCost(rows: readonly CostRow[], pricing: Pricing): NetC
   for (const row of rows) {
     const prev = row.sessionId ? last.get(row.sessionId) : undefined;
     if (row.tokensIn === null) rowsWithoutUsage++;
+    jevUsd += ((row.jevTokensIn ?? 0) * pricing.jev.input + (row.jevTokensOut ?? 0) * pricing.jev.output) / PER_MTOK;
 
     if (row.finalProvider === 'openai') {
       const actual = ((row.tokensIn ?? 0) * pricing.cheap.input + (row.tokensOut ?? 0) * pricing.cheap.output) / PER_MTOK;
@@ -135,7 +142,8 @@ export function computeNetCost(rows: readonly CostRow[], pricing: Pricing): NetC
     grossSavingsUsd,
     cachePenaltyUsd,
     failedCheapUsd,
-    netUsd: baselineUsd - anthropicUsd - cheapUsd,
+    jevUsd,
+    netUsd: baselineUsd - anthropicUsd - cheapUsd - jevUsd,
     transitions,
     rowsWithoutUsage,
     unpricedModels: [...unpriced].sort(),

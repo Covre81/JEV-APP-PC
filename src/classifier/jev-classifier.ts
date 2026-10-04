@@ -1,7 +1,7 @@
 import { request } from 'undici';
 import { z } from 'zod';
 import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
-import type { ClassificationInput, ComplexityClassifier } from './classifier.js';
+import type { Classification, ClassificationInput, ComplexityClassifier } from './classifier.js';
 
 /**
  * Adapter for TypeSafe JEV (`POST /v1/systemone`).
@@ -28,6 +28,11 @@ export const JevResponse = z.looseObject({
   }),
 });
 
+/** Billed tokens, read leniently: a missing or malformed usage block only loses the cost line. */
+const JevUsage = z.looseObject({
+  usage: z.looseObject({ input_tokens: z.number().int().min(0), output_tokens: z.number().int().min(0) }),
+});
+
 export interface JevClassifierOptions {
   readonly apiUrl: string;
   readonly apiKey: string;
@@ -39,7 +44,7 @@ export class JevClassifier implements ComplexityClassifier {
 
   constructor(private readonly options: JevClassifierOptions) {}
 
-  async classify(input: ClassificationInput, signal: AbortSignal): Promise<ComplexityDistribution> {
+  async classify(input: ClassificationInput, signal: AbortSignal): Promise<Classification> {
     const res = await request(this.options.apiUrl, {
       method: 'POST',
       signal,
@@ -55,7 +60,13 @@ export class JevClassifier implements ComplexityClassifier {
       throw new Error(`JEV HTTP ${res.statusCode}: ${JSON.stringify(payload).slice(0, 300)}`);
     }
 
-    return parseJevAnswer(payload);
+    const usage = JevUsage.safeParse(payload);
+    return {
+      ...parseJevAnswer(payload),
+      ...(usage.success
+        ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
+        : {}),
+    };
   }
 }
 

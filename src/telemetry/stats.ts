@@ -35,6 +35,7 @@ export interface RouterStats {
   /** Dollar view: actual spend versus the all-Anthropic baseline, cache-miss penalty included. */
   readonly cost: NetCost;
   readonly cheapPriceUnset: boolean;
+  readonly jevPriceUnset: boolean;
 }
 
 export interface StatsOptions {
@@ -99,7 +100,8 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
   const costRows = all<CostRow>(`
     SELECT id, session_id AS sessionId, final_provider AS finalProvider, model, requested_model AS requestedModel,
       outcome, tokens_in AS tokensIn, tokens_out AS tokensOut, cache_read_tokens AS cacheReadTokens,
-      cache_write_tokens AS cacheWriteTokens
+      cache_write_tokens AS cacheWriteTokens,
+      json_extract(jev_decision, '$.tokensIn') AS jevTokensIn, json_extract(jev_decision, '$.tokensOut') AS jevTokensOut
     FROM router_logs ${inWindow} ORDER BY id`);
 
   return {
@@ -116,6 +118,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     estimatedTokensSaved: summary.saved,
     cost: computeNetCost(costRows, pricing),
     cheapPriceUnset: pricing.cheapPriceUnset,
+    jevPriceUnset: pricing.jevPriceUnset,
   };
 }
 
@@ -185,11 +188,15 @@ export function renderStats(s: RouterStats): string {
     ['Gross savings (cheap requests served OK)', money(c.grossSavingsUsd)],
     [`Cache-miss penalty (${fmt(c.transitions)} cheap → Anthropic returns)`, money(-c.cachePenaltyUsd)],
     ['Failed cheap attempts (paid, then redone)', money(-c.failedCheapUsd)],
+    ['Classifier (JEV) calls', money(-c.jevUsd)],
     [`NET (${verdict})`, money(c.netUsd)],
   ]);
   const warnings = [
     ...(s.cheapPriceUnset
       ? ['! Cheap provider priced at $0: set CHEAP_PRICE_INPUT_PER_MTOK / CHEAP_PRICE_OUTPUT_PER_MTOK (leave unset only for local models).']
+      : []),
+    ...(s.jevPriceUnset && s.classified > 0
+      ? ['! JEV priced at $0: set JEV_PRICE_INPUT_PER_MTOK / JEV_PRICE_OUTPUT_PER_MTOK from your TypeSafe plan.']
       : []),
     ...(c.unpricedModels.length > 0 ? [`! No list price for ${c.unpricedModels.join(', ')}: priced at $0, set PRIMARY_PRICE_*.`] : []),
     ...(c.rowsWithoutUsage > 0 ? [`! ${fmt(c.rowsWithoutUsage)} requests carried no token usage and count as $0.`] : []),

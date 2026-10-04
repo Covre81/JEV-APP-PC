@@ -16,6 +16,9 @@ export interface Pricing {
   readonly cacheWriteMultiplier: number;
   /** True when the cheap price was left at its $0 default (correct only for local models). */
   readonly cheapPriceUnset: boolean;
+  /** Price of the JEV classifier API (TypeSafe), billed per token. */
+  readonly jev: Readonly<{ input: number; output: number }>;
+  readonly jevPriceUnset: boolean;
 }
 
 /**
@@ -56,6 +59,8 @@ const PricingEnv = z.object({
   PRIMARY_PRICE_INPUT_PER_MTOK: usd.optional(),
   PRIMARY_PRICE_OUTPUT_PER_MTOK: usd.optional(),
   PRIMARY_PRICE_CACHE_READ_PER_MTOK: usd.optional(),
+  JEV_PRICE_INPUT_PER_MTOK: usd.optional(),
+  JEV_PRICE_OUTPUT_PER_MTOK: usd.optional(),
   CACHE_WRITE_MULTIPLIER: z.coerce.number().min(1).default(1.25),
 });
 
@@ -76,5 +81,7 @@ export function pricingFromEnv(env: NodeJS.ProcessEnv = process.env): Pricing {
     cheap: { input: e.CHEAP_PRICE_INPUT_PER_MTOK ?? 0, output: e.CHEAP_PRICE_OUTPUT_PER_MTOK ?? 0 },
     cacheWriteMultiplier: e.CACHE_WRITE_MULTIPLIER,
     cheapPriceUnset: e.CHEAP_PRICE_INPUT_PER_MTOK === undefined && e.CHEAP_PRICE_OUTPUT_PER_MTOK === undefined,
+    jev: { input: e.JEV_PRICE_INPUT_PER_MTOK ?? 0, output: e.JEV_PRICE_OUTPUT_PER_MTOK ?? 0 },
+    jevPriceUnset: e.JEV_PRICE_INPUT_PER_MTOK === undefined && e.JEV_PRICE_OUTPUT_PER_MTOK === undefined,
   };
 }

@@ -9,11 +9,16 @@ export interface ClassificationInput {
   readonly estimatedInputTokens: number;
 }
 
+/** A distribution plus, when the classifier is a paid API, the tokens that call billed. */
+export type Classification = ComplexityDistribution & {
+  readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
+};
+
 /**
  * System One port. Implementations must be fast (sub-second), side-effect
  * free, and either resolve with a distribution or reject — never guess silently.
  */
 export interface ComplexityClassifier {
   readonly name: string;
-  classify(input: ClassificationInput, signal: AbortSignal): Promise<ComplexityDistribution>;
+  classify(input: ClassificationInput, signal: AbortSignal): Promise<Classification>;
 }
