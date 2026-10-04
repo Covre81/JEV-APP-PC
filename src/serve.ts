@@ -1,7 +1,7 @@
 import type { ComplexityClassifier } from './classifier/classifier.js';
 import { HeuristicClassifier } from './classifier/heuristic-classifier.js';
 import { JevClassifier } from './classifier/jev-classifier.js';
-import type { Config } from './config.js';
+import { removedEnvSet, type Config } from './config.js';
 import type { Route } from './domain/policy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAICompatibleProvider } from './providers/openai/provider.js';
@@ -65,6 +65,8 @@ export async function serve(config: Config): Promise<void> {
     },
     'jev-router ready',
   );
+  const stale = removedEnvSet();
+  if (stale.length > 0) app.log.warn({ stale }, 'ignored: these env vars were removed, delete them from .env');
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {

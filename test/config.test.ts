@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, removedEnvSet } from '../src/config.js';
 
 const base = { CLASSIFIER: 'heuristic', CHEAP_API_KEY: 'x' };
 
@@ -18,5 +18,12 @@ describe('loadConfig security guards', () => {
 
   it('rejects a proxy token shorter than 16 characters', () => {
     assert.throws(() => loadConfig({ ...base, PROXY_AUTH_TOKEN: 'short' }), /PROXY_AUTH_TOKEN/);
+  });
+});
+
+describe('removedEnvSet', () => {
+  it('lists env vars that no longer exist but are still set', () => {
+    assert.deepEqual(removedEnvSet({ ROUTER_ALLOW_ESCALATION: 'false', HOST: '127.0.0.1' }), ['ROUTER_ALLOW_ESCALATION']);
+    assert.deepEqual(removedEnvSet({}), []);
   });
 });

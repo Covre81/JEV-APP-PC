@@ -59,6 +59,13 @@ const Env = z
     }
   });
 
+/** Env vars that were removed: an old .env that still sets them is otherwise ignored without a word. */
+const REMOVED_ENV = ['ROUTER_ALLOW_ESCALATION', 'SESSION_MAX_ENTRIES'] as const;
+
+export function removedEnvSet(env: NodeJS.ProcessEnv = process.env): string[] {
+  return REMOVED_ENV.filter((name) => env[name] !== undefined);
+}
+
 export type Config = Readonly<ReturnType<typeof loadConfig>>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
