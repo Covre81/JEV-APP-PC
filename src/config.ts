@@ -59,7 +59,14 @@ const Env = z
     }
   });
 
-export type Config = ReturnType<typeof loadConfig>;
+/** Env vars that were removed: an old .env that still sets them is otherwise ignored without a word. */
+const REMOVED_ENV = ['ROUTER_ALLOW_ESCALATION', 'SESSION_MAX_ENTRIES'] as const;
+
+export function removedEnvSet(env: NodeJS.ProcessEnv = process.env): string[] {
+  return REMOVED_ENV.filter((name) => env[name] !== undefined);
+}
+
+export type Config = Readonly<ReturnType<typeof loadConfig>>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -108,6 +115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,
       sessionTtlMs: e.SESSION_TTL_MS,
     },
+    // dbPath is undefined when telemetry is disabled.
     telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
   };
 }

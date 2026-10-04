@@ -22,7 +22,8 @@ const absolutePath = z.string().refine((p) => p.startsWith('/'), 'file_path must
 const ToolInputs = {
   Read: z.strictObject({
     file_path: absolutePath,
-    offset: z.number().int().min(1).optional(),
+    // Claude Code 2.1.289 accepts offset 0 and reads from the first line.
+    offset: z.number().int().min(0).optional(),
     limit: z.number().int().positive().optional(),
   }),
   Edit: z.strictObject({
@@ -156,7 +157,7 @@ export class Workspace {
       return fail(`File does not exist: ${file_path}`);
     }
     this.read.add(file_path);
-    const start = (offset ?? 1) - 1;
+    const start = Math.max((offset ?? 1) - 1, 0);
     const lines = text.split('\n').slice(start, limit === undefined ? undefined : start + limit);
     return ok(lines.map((line, i) => `${String(start + i + 1).padStart(6)}→${line}`).join('\n'));
   }
@@ -332,8 +333,8 @@ export const TASKS: readonly BenchTask[] = [
  * - fallback: the provider refused before the first byte. The router sends
  *   this turn to Anthropic (cost: full-price history re-send).
  * - stream_error: the stream broke after it started (e.g. invalid tool JSON).
- *   The router sends an error event; Claude Code retries and the retry goes
- *   to Anthropic (cost: full-price history re-send).
+ *   The router sends an error event; Claude Code retries, and the retry goes
+ *   to Anthropic except on a first turn, which is re-classified (ADR rule 4).
  * - truncated: stop_reason max_tokens or refusal.
  */
 export type TrialOutcome = 'success' | 'wrong_result' | 'max_steps' | 'fallback' | 'stream_error' | 'truncated';

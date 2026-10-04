@@ -1,7 +1,7 @@
 import type { ComplexityClassifier } from './classifier/classifier.js';
 import { HeuristicClassifier } from './classifier/heuristic-classifier.js';
 import { JevClassifier } from './classifier/jev-classifier.js';
-import type { Config } from './config.js';
+import { removedEnvSet, type Config } from './config.js';
 import type { Route } from './domain/policy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAICompatibleProvider } from './providers/openai/provider.js';
@@ -10,6 +10,11 @@ import { Router } from './routing/router.js';
 import { TtlLruStore } from './routing/session-store.js';
 import { openTelemetryDb } from './telemetry/db.js';
 import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/recorder.js';
+
+// ponytail: fixed cap, one entry per live conversation. An evicted cheap
+// conversation is treated as unknown and goes primary: savings lost, never
+// correctness. Raise it only if `stats` shows that under heavy parallel use.
+const SESSION_MAX_ENTRIES = 10_000;
 
 /** Composition root: the only place that knows concrete implementations. */
 export async function serve(config: Config): Promise<void> {
@@ -24,7 +29,7 @@ export async function serve(config: Config): Promise<void> {
 
   const router = new Router(
     classifier,
-    new TtlLruStore<Route>(10_000, config.router.sessionTtlMs),
+    new TtlLruStore<Route>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
     {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
@@ -60,6 +65,8 @@ export async function serve(config: Config): Promise<void> {
     },
     'jev-router ready',
   );
+  const stale = removedEnvSet();
+  if (stale.length > 0) app.log.warn({ stale }, 'ignored: these env vars were removed, delete them from .env');
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {

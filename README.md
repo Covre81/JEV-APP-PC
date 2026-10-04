@@ -175,7 +175,7 @@ Code only parses Anthropic events.
 | `fastify` | Raw-buffer bodies with a hard `bodyLimit`, streamed replies, pino logging |
 | `undici` | One HTTP client for all three upstreams. `request()` exposes the raw, non-decompressed stream that the Anthropic passthrough needs |
 | `zod` | Validates env, the body fields we read, and every JEV/OpenAI payload |
-| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot |
+| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot. **Held at `^12`:** v13 ships no prebuilt binaries and needs a C++ toolchain (MSVC) to install on Windows |
 
 Deliberately absent:
 
@@ -371,7 +371,7 @@ trial ends as:
 | `success` | Task verified |
 | `wrong_result` / `max_steps` | Protocol fine, work wrong: silent quality loss |
 | `fallback` | Refused before the first byte: the turn goes to Anthropic |
-| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event, Claude Code retries and the retry goes to Anthropic |
+| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event and Claude Code retries; the retry goes to Anthropic, except on a conversation's first turn, where it is re-classified (ADR rule 4) |
 | `truncated` | `max_tokens` or refusal |
 
 ```bash
@@ -396,3 +396,11 @@ npx tsx scripts/smoke-anthropic.ts --model claude-haiku-4-5
 Groq and OpenRouter are both OpenAI-compatible: point `CHEAP_BASE_URL` /
 `CHEAP_API_KEY` / `CHEAP_MODEL` at either one and run `bench.ts`, which already
 streams through the real SSE translation.
+
+### Bench history
+
+Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MODEL`, and add a row.
+
+| Date | Model | Trials | Success | Provider failures | Avg trial | Notes |
+|---|---|---|---|---|---|---|
+| 2026-10-04 | `gpt-oss:20b-cloud` | 15 (pad 32 KB, 12 steps) | 93% | 7% (1 `stream_error`) | 6.7 s | 25 schema errors, mostly `Read` with `offset: 0`, which Claude Code accepts (the bench now does too, so they were bench artifacts). A separate 45-trial capture: 0 `stream_error`, 1 `rename` `wrong_result` (import not updated). |

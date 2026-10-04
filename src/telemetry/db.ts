@@ -23,7 +23,9 @@ export function openTelemetryDb(path: string, options: { readonly readonly?: boo
 function migrate(db: TelemetryDb): void {
   let applied = db.pragma('user_version', { simple: true }) as number;
   if (applied >= MIGRATIONS.length) return;
-  // Databases created while drizzle ran the migrations count them in __drizzle_migrations instead.
+  // ponytail: drizzle bridge. Databases created under drizzle count their migrations in
+  // __drizzle_migrations instead. Delete once every telemetry.db has been opened by this
+  // version (it sets user_version, so the bridge never runs twice on the same file).
   if (applied === 0 && db.prepare(`SELECT 1 FROM sqlite_master WHERE name = '__drizzle_migrations'`).get()) {
     applied = (db.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get() as { n: number }).n;
   }

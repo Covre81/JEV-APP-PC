@@ -2,3 +2,6 @@ node_modules/
 dist/
 .env
 *.log
+graphify-out/
+.cursor/
+.ai-memory.toml

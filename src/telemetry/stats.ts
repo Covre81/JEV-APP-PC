@@ -47,17 +47,17 @@ const EMPTY: ProviderStats = { requests: 0, ok: 0, tokensIn: 0, tokensOut: 0, ca
 export function computeStats(db: TelemetryDb, options: StatsOptions = {}): RouterStats {
   const { since } = options;
   const pricing = options.pricing ?? pricingFromEnv({});
-  const window = { since: since?.getTime() ?? null };
-  const WHERE = 'WHERE (@since IS NULL OR created_at >= @since)';
-  const all = <T>(sql: string) => db.prepare(sql).all(window) as T[];
-  const get = <T>(sql: string) => db.prepare(sql).get(window) as T;
+  const params = { since: since?.getTime() ?? null };
+  const inWindow = 'WHERE (@since IS NULL OR created_at >= @since)';
+  const all = <T>(sql: string) => db.prepare(sql).all(params) as T[];
+  const get = <T>(sql: string) => db.prepare(sql).get(params) as T;
 
   const rows = all<{ provider: FinalProvider } & ProviderStats>(`
     SELECT final_provider AS provider, count(*) AS requests,
       sum(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END) AS ok,
       coalesce(sum(tokens_in), 0) AS tokensIn, coalesce(sum(tokens_out), 0) AS tokensOut,
       coalesce(sum(cache_read_tokens), 0) AS cacheReadTokens, avg(latency_ms) AS avgLatencyMs
-    FROM router_logs ${WHERE} GROUP BY final_provider`);
+    FROM router_logs ${inWindow} GROUP BY final_provider`);
 
   const byProvider: Record<FinalProvider, ProviderStats> = { anthropic: EMPTY, openai: EMPTY };
   for (const r of rows) {
@@ -84,14 +84,14 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
       coalesce(sum(fallback_triggered), 0) AS fallbacks,
       coalesce(sum(CASE WHEN final_provider = 'openai' AND outcome = 'ok'
         THEN coalesce(tokens_in, 0) + coalesce(tokens_out, 0) ELSE 0 END), 0) AS saved
-    FROM router_logs ${WHERE}`);
+    FROM router_logs ${inWindow}`);
 
   const cheapStreamErrors = get<{ n: number }>(
-    `SELECT count(*) AS n FROM router_logs ${WHERE} AND final_provider = 'openai' AND outcome = 'stream_error'`,
+    `SELECT count(*) AS n FROM router_logs ${inWindow} AND final_provider = 'openai' AND outcome = 'stream_error'`,
   ).n;
 
   const repeats = all<{ sends: number }>(`
-    SELECT count(*) AS sends FROM router_logs ${WHERE} AND human_prompt_hash IS NOT NULL
+    SELECT count(*) AS sends FROM router_logs ${inWindow} AND human_prompt_hash IS NOT NULL
     GROUP BY human_prompt_hash HAVING count(*) > 1`);
 
   // With --since, a session whose earlier turns fall outside the window starts
@@ -100,7 +100,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     SELECT id, session_id AS sessionId, final_provider AS finalProvider, model, requested_model AS requestedModel,
       outcome, tokens_in AS tokensIn, tokens_out AS tokensOut, cache_read_tokens AS cacheReadTokens,
       cache_write_tokens AS cacheWriteTokens
-    FROM router_logs ${WHERE} ORDER BY id`);
+    FROM router_logs ${inWindow} ORDER BY id`);
 
   return {
     since: since ?? null,
