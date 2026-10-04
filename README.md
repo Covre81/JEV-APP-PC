@@ -334,7 +334,7 @@ HAVING min(final_provider) = 'anthropic' AND max(final_provider) = 'openai';
 ## Checks against real APIs (local only)
 
 CI runs only the offline suite (`npm test`: every upstream is a local fake).
-Two scripts call real services and are meant to be run by hand. Both read the
+Three scripts call real services and are meant to be run by hand. Both read the
 same env files as the CLI (`--env <file>`, else `./.env`, else
 `~/.jev-router/.env`).
 
@@ -367,3 +367,18 @@ npx tsx scripts/bench.ts --task rename --model llama3.1:latest --json
 
 `--pad-kb` grows the system prompt toward Claude Code's real context size.
 Exit 0 when the success rate reaches `--min-success` (default 0.8).
+
+**Anthropic passthrough smoke**: two small calls through the real
+`AnthropicProvider` in `inject` mode (needs `ANTHROPIC_API_KEY`). Checks a
+streamed turn (HTTP 200, `text/event-stream`, `anthropic-ratelimit-*` and
+`request-id` forwarded, `message_start` ... `message_stop` in order, with
+`accept-encoding` as Claude Code sends it) and that an upstream 4xx reaches the
+client as Anthropic's own JSON error. Exit 0 = all checks pass.
+
+```bash
+npx tsx scripts/smoke-anthropic.ts --model claude-haiku-4-5
+```
+
+Groq and OpenRouter are both OpenAI-compatible: point `CHEAP_BASE_URL` /
+`CHEAP_API_KEY` / `CHEAP_MODEL` at either one and run `bench.ts`, which already
+streams through the real SSE translation.
