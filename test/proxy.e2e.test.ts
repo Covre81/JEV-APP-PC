@@ -169,7 +169,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(cheapLog[0]?.url, '/openai/v1/chat/completions');
     assert.equal(cheapLog[0]?.headers.authorization, 'Bearer gsk_test');
     assert.equal(cheapLog[0]?.headers['x-api-key'], undefined, 'Anthropic credentials never leak to the cheap provider');
-    assert.equal(cheapLog[0]?.body.model, 'openai/gpt-oss-20b');
+    assert.equal(cheapLog[0]?.body.model, 'gpt-oss:20b-cloud');
   });
 
   it('sends structural work to Anthropic byte-for-byte', async () => {
@@ -229,7 +229,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     const [cheapRow] = await logsFor('T-cheap');
     assert.ok(cheapRow);
     assert.equal(cheapRow.finalProvider, 'openai');
-    assert.equal(cheapRow.model, 'openai/gpt-oss-20b');
+    assert.equal(cheapRow.model, 'gpt-oss:20b-cloud');
     assert.equal(cheapRow.requestedModel, 'claude-opus-5-5', 'the baseline prices what Anthropic would have run');
     assert.equal(cheapRow.outcome, 'ok');
     assert.equal(cheapRow.tokensIn, 40);

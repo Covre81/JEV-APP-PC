@@ -27,9 +27,9 @@ const Env = z
     JEV_TIMEOUT_MS: z.coerce.number().int().positive().default(1_500),
     CLASSIFIER_MAX_CHARS: z.coerce.number().int().positive().default(4_000),
 
-    CHEAP_BASE_URL: z.url().default('https://api.groq.com/openai/v1'),
+    CHEAP_BASE_URL: z.url().default('http://127.0.0.1:11434/v1'),
     CHEAP_API_KEY: z.string().min(1),
-    CHEAP_MODEL: z.string().min(1).default('openai/gpt-oss-20b'),
+    CHEAP_MODEL: z.string().min(1).default('gpt-oss:20b-cloud'),
     CHEAP_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8_192),
     CHEAP_CONTEXT_TOKENS: z.coerce.number().int().positive().default(131_072),
     CHEAP_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),

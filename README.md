@@ -4,12 +4,12 @@ A local, Anthropic-compatible gateway for Claude Code (or any Messages-API
 client) that uses **TypeSafe JEV** as a System One classifier to keep simple
 work off your Claude quota.
 
-- **Simple work** goes to a cheap OpenAI-compatible provider, such as Groq or
-  OpenRouter.
+- **Simple work** goes to a cheap OpenAI-compatible provider: Ollama Cloud
+  (default, free plan), Groq or OpenRouter.
 - **Structural work** goes to Anthropic.
 
 ```
-                                      ┌─ simple ───▶ Groq / OpenRouter  (/chat/completions, translated)
+                                      ┌─ simple ───▶ Ollama Cloud / Groq / OpenRouter  (/chat/completions, translated)
 Claude Code ──▶ jev-router :8787 ──┤
                     │                 └─ structural ─▶ Anthropic          (/v1/messages, byte-for-byte)
                     └─ new human turn ─▶ JEV /v1/systemone
@@ -29,7 +29,7 @@ only on work that needs Claude**.
 
 | Route | Provider | Billing | Gets |
 |---|---|---|---|
-| `cheap` | Any OpenAI-compatible API (default: Groq `openai/gpt-oss-20b`) | Per token, separate account | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
+| `cheap` | Any OpenAI-compatible API (default: Ollama Cloud `gpt-oss:20b-cloud`) | Free plan with usage limits, or per token on Groq/OpenRouter | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
 | `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Also level 2 by default, plus everything the cheap route can't carry |
 
 **Rules.**
@@ -190,7 +190,8 @@ git clone https://github.com/covre81/jev-app-pc.git jev-router && cd jev-router
 npm ci
 cp .env.example .env
 #   TYPESAFE_API_KEY=...   (or CLASSIFIER=heuristic for offline dev)
-#   CHEAP_API_KEY=...      (Groq: gsk_..., OpenRouter: sk-or-...)
+#   Ollama Cloud (default): `ollama signin && ollama pull gpt-oss:20b-cloud`, no key
+#   Groq / OpenRouter: set CHEAP_BASE_URL, CHEAP_MODEL and CHEAP_API_KEY (see presets)
 npm test                   # fake upstreams, no network
 npm run build && npm start
 curl -s localhost:8787/healthz
@@ -219,7 +220,12 @@ link points at this checkout, so nothing else needs reinstalling.
 **Cheap provider presets:**
 
 ```bash
-# Groq (default)
+# Ollama Cloud via the local daemon (default, free plan)
+CHEAP_BASE_URL=http://127.0.0.1:11434/v1
+CHEAP_API_KEY=ollama
+CHEAP_MODEL=gpt-oss:20b-cloud
+
+# Groq
 CHEAP_BASE_URL=https://api.groq.com/openai/v1
 CHEAP_MODEL=openai/gpt-oss-20b
 
@@ -227,6 +233,12 @@ CHEAP_MODEL=openai/gpt-oss-20b
 CHEAP_BASE_URL=https://openrouter.ai/api/v1
 CHEAP_MODEL=<any tool-calling model id from openrouter.ai/models>
 ```
+
+Ollama Cloud runs the model on ollama.com: the prompt, including your code,
+leaves the machine, and the free plan has usage limits. When a limit is hit
+the request fails before the first byte and the router falls back to
+Anthropic. A local model (`qwen2.5:14b`, `llama3.1`) keeps everything on the
+machine but is much slower on CPU; run `bench.ts` before choosing it.
 
 On Groq, `llama-3.1-8b-instant` was deprecated for free and dev tiers on
 2026-08-16, with `openai/gpt-oss-20b` as the recommended replacement. That is
