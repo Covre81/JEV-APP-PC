@@ -163,6 +163,12 @@ export function buildServer({ config, router, providers, telemetry = noopTelemet
 
   app.setErrorHandler((err, req, reply) => {
     if (reply.raw.destroyed) return; // client went away mid-request
+    // Fastify's own 4xx (body too large, bad content type) are the client's problem, not the upstream's.
+    const status = (err as unknown as { statusCode?: number }).statusCode;
+    if (status !== undefined && status >= 400 && status < 500) {
+      const message = (err as unknown as { message?: string }).message || 'request error';
+      return reply.code(status).send(anthropicError(status === 413 ? 'request_too_large' : 'invalid_request_error', message));
+    }
     req.log.error({ err }, 'request failed');
     return reply.code(502).send(anthropicError('api_error', 'jev-router: upstream unreachable'));
   });

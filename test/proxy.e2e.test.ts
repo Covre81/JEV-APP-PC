@@ -443,3 +443,52 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
     assert.deepEqual(await res.body.json(), { ok: true });
   });
 });
+
+describe('body limit', () => {
+  let upstream: { server: Server; url: string };
+  let proxy: FastifyInstance;
+  let proxyUrl: string;
+  const seen: Seen[] = [];
+
+  before(async () => {
+    upstream = await fakeServer(() => anthropicOk, seen);
+    const config = loadConfig({
+      CLASSIFIER: 'heuristic',
+      CHEAP_API_KEY: 'unused',
+      ANTHROPIC_UPSTREAM_URL: upstream.url,
+      BODY_LIMIT_BYTES: '2000',
+      LOG_LEVEL: 'fatal',
+    });
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+      policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
+      primaryClasses: config.router.primaryClasses,
+      cheapContextTokens: 100_000,
+      classifierTimeoutMs: 1_000,
+      classifierMaxChars: 4_000,
+    });
+    proxy = buildServer({
+      config,
+      router,
+      providers: { primary: new AnthropicProvider(config.primary), cheap: new OpenAICompatibleProvider(config.cheap) },
+    });
+    await proxy.listen({ host: '127.0.0.1', port: 0 });
+    proxyUrl = `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}`;
+  });
+
+  after(async () => {
+    await proxy.close();
+    upstream.server.close();
+  });
+
+  it('answers an oversized body with 413, not an upstream error', async () => {
+    const res = await request(`${proxyUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-opus-5-5', max_tokens: 10, messages: [{ role: 'user', content: 'x'.repeat(5_000) }] }),
+    });
+    const body = (await res.body.json()) as { error: { type: string } };
+    assert.equal(res.statusCode, 413);
+    assert.equal(body.error.type, 'request_too_large');
+    assert.equal(seen.length, 0, 'nothing reaches Anthropic');
+  });
+});
