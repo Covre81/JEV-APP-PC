@@ -25,6 +25,15 @@ describe('selectRoute', () => {
   });
 });
 
+describe('selectRoute risk veto', () => {
+  it('keeps confidently simple but risky work on the primary', () => {
+    const d = { simple: 0.96, standard: 0.03, structural: 0.01 };
+    assert.equal(selectRoute({ ...d, risk: 0.94 }, options), 'primary');
+    assert.equal(selectRoute({ ...d, risk: 0.15 }, options), 'cheap');
+    assert.equal(selectRoute(d, options), 'cheap');
+  });
+});
+
 describe('stickyRoute', () => {
   it('escalates but never de-escalates', () => {
     assert.equal(stickyRoute('cheap', 'primary'), 'primary');

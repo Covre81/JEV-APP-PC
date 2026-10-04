@@ -19,6 +19,29 @@ const COMPLEXITY_CRITERIA = [
   'Structural or complex: Clean Architecture/SOLID refactors across layers, test-suite design with heavy fixtures or mocking, concurrency, security or performance root causes, migrations, ambiguous requirements.',
 ] as const;
 
+/**
+ * Speculative Nouls asked in the same call (evaluated in parallel, no extra
+ * latency): work JEV may score as simple that must still stay on the primary.
+ */
+export const RISK_QUESTIONS = {
+  security_sensitive: {
+    type: 'noul',
+    instructions:
+      'The request changes authentication, authorization, password hashing, token validation, cryptography, or how secrets and API keys are stored.',
+  },
+  destructive_or_production: {
+    type: 'noul',
+    instructions: 'The request deletes data or files, runs a database migration, or acts on a production system.',
+  },
+} as const;
+
+/** Risk answers are a safety gate: required, so a missing one fails the call toward primary. */
+const JevRisk = z.looseObject({
+  answers: z.looseObject(
+    Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, z.looseObject({ noul: z.number().min(0).max(1) })])),
+  ),
+});
+
 /** The part of the JEV response the adapter depends on. Unknown fields are tolerated. */
 export const JevResponse = z.looseObject({
   answers: z.looseObject({
@@ -67,6 +90,7 @@ export class JevClassifier implements ComplexityClassifier {
     const model = JevModel.safeParse(payload);
     return {
       ...parseJevAnswer(payload),
+      risk: parseJevRisk(payload),
       ...(usage.success
         ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
         : {}),
@@ -86,6 +110,7 @@ export function jevRequestBody(model: string, input: ClassificationInput): objec
         instructions: 'How complex is this request for an AI coding agent working in the developer repository?',
         criteria: COMPLEXITY_CRITERIA,
       },
+      ...RISK_QUESTIONS,
     },
   };
 }
@@ -94,6 +119,12 @@ export function jevRequestBody(model: string, input: ClassificationInput): objec
 export function parseJevAnswer(payload: unknown): ComplexityDistribution {
   const { probabilities: p } = JevResponse.parse(payload).answers[QUESTION_ID]!;
   return toDistribution(p['0'] ?? 0, p['1'] ?? 0, p['2'] ?? 0);
+}
+
+/** Highest of the risk Nouls; throws when any is missing. */
+export function parseJevRisk(payload: unknown): number {
+  const answers = JevRisk.parse(payload).answers as Record<string, { noul: number }>;
+  return Math.max(...Object.keys(RISK_QUESTIONS).map((k) => answers[k]!.noul));
 }
 
 /**
@@ -117,6 +148,8 @@ export function jevContractIssues(payload: unknown): string[] {
   if (extra.length > 0) issues.push(`probabilities: unexpected levels ${JSON.stringify(extra)}`);
   const sum = Object.values(p).reduce((a, b) => a + b, 0);
   if (Math.abs(sum - 1) > 0.02) issues.push(`probabilities: sum is ${sum.toFixed(4)}, expected 1 ± 0.02`);
+  const risk = JevRisk.safeParse(payload);
+  if (!risk.success) issues.push(...risk.error.issues.map((i) => `risk: ${i.path.join('.')}: ${i.message}`));
   return issues;
 }
 
