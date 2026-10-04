@@ -90,6 +90,19 @@ describe('Router (multi-provider)', () => {
     assert.deepEqual([d.route, d.reason], ['primary', 'passthrough:classifier-failed']);
   });
 
+  it('escalates a cheap conversation when JEV fails on a new human turn', async () => {
+    let script: () => ComplexityDistribution | Error = () => SIMPLE;
+    const { router } = setup(() => script());
+    assert.equal((await router.decide(ctx([user('fix the typo')]))).route, 'cheap');
+
+    script = () => new Error('timeout');
+    const d = await router.decide(ctx([user('fix the typo'), assistantText, user('now redesign the module')]));
+    assert.deepEqual([d.route, d.reason], ['primary', 'passthrough:classifier-failed']);
+
+    const next = await router.decide(ctx([user('fix the typo'), assistantText, user('now redesign the module'), assistantToolUse, toolResult]));
+    assert.deepEqual([next.route, next.reason], ['primary', 'sticky'], 'primary is terminal');
+  });
+
   it('keeps auxiliary and compaction traffic on the primary', async () => {
     const { router, classifier } = setup(() => SIMPLE);
     const d = await router.decide(ctx([user('title this')], { requestClass: 'auxiliary' }));
