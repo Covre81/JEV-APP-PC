@@ -12,6 +12,37 @@
 
 ---
 
+## Status: concluído (2026-10-04)
+
+Todas as tarefas entraram no `main` pelos PRs #3 a #5. As caixas abaixo estão marcadas; o texto das tarefas é o registro do que foi pedido, não do estado atual.
+
+| Tarefa | Commit | Desvio do plano |
+|---|---|---|
+| 1 `.gitignore` | `95b0571` | — |
+| 2 CI Windows + Node 24 | `4ae7c24` | Commit na branch do backlog, sem PR separado; a matriz rodou nos PRs seguintes. |
+| 3 Docs do `stream_error` | `f576951` | A linha do `better-sqlite3` (passo 3) foi superada pelo `d91584a`. |
+| 4 Tetos nomeados | `1445a63` | — |
+| 5 Nomes em `stats.ts` | `6488021` | O `sed` do plano também renomearia o `window` de `renderStats`; a troca ficou restrita a `computeStats`. |
+| 6 `Config` readonly | `12ee48b` | — |
+| 7 Aviso de variáveis removidas | `9f1219c` | — |
+| 8 BUG `proxy_error` | `afb2f0e` | — |
+| 9 BUG 413 | `febe1f9` | — |
+| 10 Testes fiéis ao Claude Code | `93c4200` | — |
+| 11 `client_abort` | `f1ac908` | — |
+| 12 `TtlLruStore` | `5bea006` | — |
+| 13 Histórico do bench | `beaf142` | Seção no fim de "Checks against real APIs". |
+| 14 `Read offset: 0` | `8c7742e` | O Claude Code aceita: o bench passou a aceitar também. |
+| 15 Cobertura | `f232e83` | — |
+
+Decisões:
+- **D1:** sugestão de limiar 0,9 e consulta de medição documentadas (`11c1ac0`).
+- **D2:** mantida a opção A (sem fixação no primeiro turno).
+- **D3:** trocado para `node:sqlite` (`d91584a`). As menções a `better-sqlite3` neste plano são históricas.
+
+Depois do plano: a falha do JEV num turno humano de conversa já no barato passou a escalar para primary, como a regra 4 do ADR exige (`fix/jev-failure-escalates`).
+
+---
+
 ## Já resolvido (registro)
 
 | Origem | Item | Commit |
@@ -39,7 +70,7 @@
 
 **Arquivos:** Modificar `.gitignore`
 
-- [ ] **Passo 1: acrescentar as três entradas**
+- [x] **Passo 1: acrescentar as três entradas**
 
 ```gitignore
 graphify-out/
@@ -47,12 +78,12 @@ graphify-out/
 .ai-memory.toml
 ```
 
-- [ ] **Passo 2: verificar**
+- [x] **Passo 2: verificar**
 
 Run: `git status -s`
 Expected: nenhuma linha `??` para `graphify-out/`, `.cursor/` ou `.ai-memory.toml`.
 
-- [ ] **Passo 3: commit**
+- [x] **Passo 3: commit**
 
 ```bash
 git add .gitignore
@@ -65,7 +96,7 @@ Motivo: o Bruno desenvolve em Windows/Node 24 e a CI só roda Ubuntu/Node 22, en
 
 **Arquivos:** Modificar `.github/workflows/ci.yml` (bloco `jobs.test`)
 
-- [ ] **Passo 1: trocar o cabeçalho do job e o `setup-node`**
+- [x] **Passo 1: trocar o cabeçalho do job e o `setup-node`**
 
 ```yaml
 jobs:
@@ -87,7 +118,7 @@ jobs:
 
 O resto dos `steps` (`npm ci`, `npm run typecheck`, `npm test`) não muda.
 
-- [ ] **Passo 2: commit em branch e abrir PR**
+- [x] **Passo 2: commit em branch e abrir PR**
 
 ```bash
 git switch -c ci/windows-node24
@@ -97,7 +128,7 @@ git push -u origin ci/windows-node24
 gh pr create --fill
 ```
 
-- [ ] **Passo 3: verificar**
+- [x] **Passo 3: verificar**
 
 Expected: os 4 jobs verdes no PR. Se o Windows falhar em teste com caminho ou tempo, corrigir o teste no mesmo PR; não mesclar com job vermelho.
 
@@ -107,13 +138,13 @@ Motivo: README:374 e `scripts/bench/harness.ts:334-336` dizem sem condição que
 
 **Arquivos:** Modificar `README.md:374`, `scripts/bench/harness.ts:334-336`
 
-- [ ] **Passo 1: README, linha da tabela do bench**
+- [x] **Passo 1: README, linha da tabela do bench**
 
 ```markdown
 | `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event and Claude Code retries; the retry goes to Anthropic, except on a conversation's first turn, where it is re-classified (ADR rule 4) |
 ```
 
-- [ ] **Passo 2: comentário em `harness.ts`**
+- [x] **Passo 2: comentário em `harness.ts`**
 
 ```ts
  * - stream_error: the stream broke after it started (e.g. invalid tool JSON).
@@ -121,7 +152,7 @@ Motivo: README:374 e `scripts/bench/harness.ts:334-336` dizem sem condição que
  *   to Anthropic except on a first turn, which is re-classified (ADR rule 4).
 ```
 
-- [ ] **Passo 3: README, linha do `better-sqlite3` na tabela "Dependencies"**
+- [x] **Passo 3: README, linha do `better-sqlite3` na tabela "Dependencies"**
 
 O `package.json` não aceita comentário. Quem for subir a versão lê esta linha.
 
@@ -129,7 +160,7 @@ O `package.json` não aceita comentário. Quem for subir a versão lê esta linh
 | `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot. **Held at `^12`:** v13 ships no prebuilt binaries and needs a C++ toolchain (MSVC) to install on Windows |
 ```
 
-- [ ] **Passo 4: commit**
+- [x] **Passo 4: commit**
 
 ```bash
 git add README.md scripts/bench/harness.ts
@@ -140,7 +171,7 @@ git commit -m "docs: first-turn stream_error retry is re-classified; why better-
 
 **Arquivos:** Modificar `src/serve.ts:25-27`, `src/telemetry/db.ts:25`
 
-- [ ] **Passo 1: `serve.ts`, antes de `export async function serve`**
+- [x] **Passo 1: `serve.ts`, antes de `export async function serve`**
 
 ```ts
 // ponytail: fixed cap, one entry per live conversation. An evicted cheap
@@ -155,7 +186,7 @@ e na construção do router:
     new TtlLruStore<Route>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
 ```
 
-- [ ] **Passo 2: `db.ts`, trocar o comentário da ponte**
+- [x] **Passo 2: `db.ts`, trocar o comentário da ponte**
 
 ```ts
   // ponytail: drizzle bridge. Databases created under drizzle count their migrations in
@@ -163,7 +194,7 @@ e na construção do router:
   // version (it sets user_version, so the bridge never runs twice on the same file).
 ```
 
-- [ ] **Passo 3: verificar e commitar**
+- [x] **Passo 3: verificar e commitar**
 
 Run: `npm run typecheck && npm test`
 Expected: tudo verde.
@@ -179,13 +210,13 @@ git commit -m "refactor: name the session cap and date the drizzle bridge"
 
 **Arquivos:** Modificar `src/telemetry/stats.ts`
 
-- [ ] **Passo 1: renomear**
+- [x] **Passo 1: renomear**
 
 ```bash
 sed -i 's/const window = /const params = /; s/(window)/(params)/g; s/const WHERE = /const inWindow = /; s/\${WHERE}/${inWindow}/g' src/telemetry/stats.ts
 ```
 
-- [ ] **Passo 2: verificar**
+- [x] **Passo 2: verificar**
 
 Run: `grep -nE "window|WHERE" src/telemetry/stats.ts`
 Expected: sobram só `WHERE` dentro de strings SQL (`'WHERE (@since IS NULL ...'`) e a palavra "window" em comentários (por exemplo "fall outside the window"). Nenhuma variável `window` nem `WHERE`.
@@ -193,7 +224,7 @@ Expected: sobram só `WHERE` dentro de strings SQL (`'WHERE (@since IS NULL ...'
 Run: `npm run typecheck && npx tsx --test test/telemetry-stats.test.ts`
 Expected: PASS.
 
-- [ ] **Passo 3: commit**
+- [x] **Passo 3: commit**
 
 ```bash
 git add src/telemetry/stats.ts
@@ -204,20 +235,20 @@ git commit -m "refactor(telemetry): clearer names for the stats query window"
 
 **Arquivos:** Modificar `src/config.ts`
 
-- [ ] **Passo 1: tipo**
+- [x] **Passo 1: tipo**
 
 ```ts
 export type Config = Readonly<ReturnType<typeof loadConfig>>;
 ```
 
-- [ ] **Passo 2: comentário na linha `telemetry:` do objeto retornado**
+- [x] **Passo 2: comentário na linha `telemetry:` do objeto retornado**
 
 ```ts
     // dbPath is undefined when telemetry is disabled.
     telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
 ```
 
-- [ ] **Passo 3: verificar e commitar**
+- [x] **Passo 3: verificar e commitar**
 
 Run: `npm run typecheck && npm test`
 Expected: tudo verde.
@@ -233,7 +264,7 @@ Motivo: `ROUTER_ALLOW_ESCALATION` e `SESSION_MAX_ENTRIES` hoje são descartadas 
 
 **Arquivos:** Modificar `src/config.ts`, `src/serve.ts`; Teste `test/config.test.ts`
 
-- [ ] **Passo 1: teste que falha (em `test/config.test.ts`)**
+- [x] **Passo 1: teste que falha (em `test/config.test.ts`)**
 
 ```ts
 import { loadConfig, removedEnvSet } from '../src/config.js';
@@ -248,12 +279,12 @@ describe('removedEnvSet', () => {
 
 (substituir o `import { loadConfig } ...` existente pela linha acima)
 
-- [ ] **Passo 2: ver falhar**
+- [x] **Passo 2: ver falhar**
 
 Run: `npx tsx --test test/config.test.ts`
 Expected: FAIL, `removedEnvSet` não é exportado.
 
-- [ ] **Passo 3: implementação mínima em `src/config.ts`**
+- [x] **Passo 3: implementação mínima em `src/config.ts`**
 
 ```ts
 /** Env vars that were removed: an old .env that still sets them is otherwise ignored without a word. */
@@ -273,12 +304,12 @@ e em `src/serve.ts`, logo após o log `'jev-router ready'`:
 
 (com `import { removedEnvSet, type Config } from './config.js';`)
 
-- [ ] **Passo 4: ver passar**
+- [x] **Passo 4: ver passar**
 
 Run: `npm run typecheck && npx tsx --test test/config.test.ts`
 Expected: PASS.
 
-- [ ] **Passo 5: commit**
+- [x] **Passo 5: commit**
 
 ```bash
 git add src/config.ts src/serve.ts test/config.test.ts
@@ -295,7 +326,7 @@ git commit -m "feat(config): warn at boot about removed env vars still set"
 
 **Arquivos:** Modificar `src/providers/anthropic.ts:23-31`; Teste `test/proxy.e2e.test.ts` (no `describe` principal, depois de `'records relayed upstream errors as http_error'`)
 
-- [ ] **Passo 1: teste que falha**
+- [x] **Passo 1: teste que falha**
 
 ```ts
   it('records proxy_error when Anthropic is unreachable', async () => {
@@ -310,12 +341,12 @@ git commit -m "feat(config): warn at boot about removed env vars still set"
   });
 ```
 
-- [ ] **Passo 2: ver falhar**
+- [x] **Passo 2: ver falhar**
 
 Run: `npx tsx --test --test-name-pattern="unreachable" test/proxy.e2e.test.ts`
 Expected: FAIL em `assert.ok(row, 'an Anthropic outage must show up in stats')`.
 
-- [ ] **Passo 3: correção no ponto comum (`AnthropicProvider.send`), espelhando o `OpenAICompatibleProvider`**
+- [x] **Passo 3: correção no ponto comum (`AnthropicProvider.send`), espelhando o `OpenAICompatibleProvider`**
 
 ```ts
   async send(req: ProviderRequest): Promise<ProviderResult> {
@@ -340,12 +371,12 @@ Expected: FAIL em `assert.ok(row, 'an Anthropic outage must show up in stats')`.
 
 Não há failover para o barato aqui: pela regra 5 do ADR, Anthropic → barato só acontece em 429/529 e é opt-in.
 
-- [ ] **Passo 4: ver passar, e a suíte inteira**
+- [x] **Passo 4: ver passar, e a suíte inteira**
 
 Run: `npm run typecheck && npm test`
 Expected: tudo verde.
 
-- [ ] **Passo 5: commit**
+- [x] **Passo 5: commit**
 
 ```bash
 git add src/providers/anthropic.ts test/proxy.e2e.test.ts
@@ -360,7 +391,7 @@ git commit -m "fix(telemetry): record proxy_error when Anthropic is unreachable"
 
 Usa um proxy pequeno próprio, como o `describe` do modo `inject`, para não impor um limite minúsculo aos outros testes. Corpo de poucos KB de propósito: com MBs, o servidor pode fechar o socket enquanto o undici ainda envia, e o cliente vê ECONNRESET em vez do 413 (sobretudo no Windows).
 
-- [ ] **Passo 1: teste que falha**
+- [x] **Passo 1: teste que falha**
 
 ```ts
 describe('body limit', () => {
@@ -413,12 +444,12 @@ describe('body limit', () => {
 });
 ```
 
-- [ ] **Passo 2: ver falhar**
+- [x] **Passo 2: ver falhar**
 
 Run: `npx tsx --test --test-name-pattern="oversized" test/proxy.e2e.test.ts`
 Expected: FAIL, `502 !== 413`.
 
-- [ ] **Passo 3: correção**
+- [x] **Passo 3: correção**
 
 ```ts
   app.setErrorHandler((err, req, reply) => {
@@ -435,7 +466,7 @@ Expected: FAIL, `502 !== 413`.
 
 `request_too_large` é o tipo que a própria Anthropic usa para 413.
 
-- [ ] **Passo 4: ver passar, de forma estável, e commitar**
+- [x] **Passo 4: ver passar, de forma estável, e commitar**
 
 Run: `for i in 1 2 3 4 5; do npx tsx --test --test-name-pattern="oversized" test/proxy.e2e.test.ts 2>&1 | grep -E "ℹ (pass|fail)"; done`
 Expected: 5 × `pass 1` / `fail 0`.
@@ -454,7 +485,7 @@ Cobre: parâmetro `text` morto no helper; retry testado com `stream: true` quand
 
 **Arquivos:** Modificar `test/proxy.e2e.test.ts`
 
-- [ ] **Passo 1: handler JSON e helper de turno com ferramenta (no topo do arquivo, ao lado dos outros handlers)**
+- [x] **Passo 1: handler JSON e helper de turno com ferramenta (no topo do arquivo, ao lado dos outros handlers)**
 
 ```ts
 /** Non-streaming chat completion: what the cheap provider returns when Claude Code retries without a stream. */
@@ -471,7 +502,7 @@ const toolLoop = (text: string) => [
 ];
 ```
 
-- [ ] **Passo 2: novo helper `claudeCode` (substitui o atual)**
+- [x] **Passo 2: novo helper `claudeCode` (substitui o atual)**
 
 ```ts
   const claudeCode = (sessionId: string, turn: string | object[], { stream = true } = {}) =>
@@ -495,7 +526,7 @@ const toolLoop = (text: string) => [
     });
 ```
 
-- [ ] **Passo 3: teste do corte no meio usa o helper novo e repete sem streaming**
+- [x] **Passo 3: teste do corte no meio usa o helper novo e repete sem streaming**
 
 ```ts
   it('ends a stream cut mid-way with an error event and sends Claude Code’s retry to Anthropic', async () => {
@@ -516,7 +547,7 @@ const toolLoop = (text: string) => [
   });
 ```
 
-- [ ] **Passo 4: o teste do 503 passa a verificar a fixação que o título promete**
+- [x] **Passo 4: o teste do 503 passa a verificar a fixação que o título promete**
 
 ```ts
   it('fails over to Anthropic when the cheap provider is down, and pins the conversation', async () => {
@@ -534,7 +565,7 @@ const toolLoop = (text: string) => [
   });
 ```
 
-- [ ] **Passo 5: teste de caracterização do primeiro turno (registra o comportamento atual; muda junto com a Decisão D2)**
+- [x] **Passo 5: teste de caracterização do primeiro turno (registra o comportamento atual; muda junto com a Decisão D2)**
 
 ```ts
   it('re-classifies the retry of a first turn cut mid-stream (ADR rule 4: the pin does not hold)', async () => {
@@ -548,7 +579,7 @@ const toolLoop = (text: string) => [
   });
 ```
 
-- [ ] **Passo 6: verificar que os testes pegam regressão**
+- [x] **Passo 6: verificar que os testes pegam regressão**
 
 Run: `npm test`
 Expected: tudo verde.
@@ -563,7 +594,7 @@ git checkout -- src/routing/router.ts
 
 Expected: falham `ends a stream cut mid-way...` e `fails over ... and pins the conversation`.
 
-- [ ] **Passo 7: commit**
+- [x] **Passo 7: commit**
 
 ```bash
 git add test/proxy.e2e.test.ts
@@ -574,7 +605,7 @@ git commit -m "test(proxy): non-streaming retry, pin after failover, first-turn 
 
 **Arquivos:** Teste `test/proxy.e2e.test.ts` (depois da Tarefa 8)
 
-- [ ] **Passo 1: teste**
+- [x] **Passo 1: teste**
 
 ```ts
   it('records client_abort when Claude Code hangs up mid-stream', async () => {
@@ -595,14 +626,14 @@ git commit -m "test(proxy): non-streaming retry, pin after failover, first-turn 
   });
 ```
 
-- [ ] **Passo 2: verificar que pega regressão**
+- [x] **Passo 2: verificar que pega regressão**
 
 Run: `npx tsx --test --test-name-pattern="client_abort" test/proxy.e2e.test.ts`
 Expected: PASS. Depois trocar em `src/telemetry/audit.ts` `? 'client_abort'` por `? 'ok'`, rodar de novo e ver FAIL, e restaurar com `git checkout -- src/telemetry/audit.ts`.
 
 Se o teste passar só às vezes, o `logsFor` (20 × 10 ms) está curto para o `close` do socket: aumentar para `for (let i = 0; i < 100; i++)` dentro de `logsFor`.
 
-- [ ] **Passo 3: commit**
+- [x] **Passo 3: commit**
 
 ```bash
 git add test/proxy.e2e.test.ts
@@ -613,7 +644,7 @@ git commit -m "test(telemetry): client hang-up is recorded as client_abort"
 
 **Arquivos:** Criar `test/session-store.test.ts`
 
-- [ ] **Passo 1: testes**
+- [x] **Passo 1: testes**
 
 ```ts
 import assert from 'node:assert/strict';
@@ -644,12 +675,12 @@ describe('TtlLruStore', () => {
 });
 ```
 
-- [ ] **Passo 2: verificar que pega regressão**
+- [x] **Passo 2: verificar que pega regressão**
 
 Run: `npx tsx --test test/session-store.test.ts`
 Expected: PASS. Depois remover a linha `this.entries.set(key, entry);` do `get` em `src/routing/session-store.ts`, ver o segundo teste falhar, e restaurar com `git checkout -- src/routing/session-store.ts`.
 
-- [ ] **Passo 3: commit**
+- [x] **Passo 3: commit**
 
 ```bash
 git add test/session-store.test.ts
@@ -664,7 +695,7 @@ git commit -m "test(routing): TTL expiry and LRU eviction of the session store"
 
 **Arquivos:** Modificar `README.md`, seção "Checks against real APIs", logo após o bloco do `bench.ts`
 
-- [ ] **Passo 1: acrescentar**
+- [x] **Passo 1: acrescentar**
 
 ```markdown
 ### Bench history
@@ -676,7 +707,7 @@ Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MOD
 | 2026-10-04 | `gpt-oss:20b-cloud` | 15 (pad 32 KB, 12 steps) | 93% | 7% (1 `stream_error`) | 6.7 s | 25 schema errors, mostly `Read` with `offset: 0`. A separate 45-trial capture: 0 `stream_error`, 1 `rename` `wrong_result` (import not updated). |
 ```
 
-- [ ] **Passo 2: commit**
+- [x] **Passo 2: commit**
 
 ```bash
 git add README.md
@@ -689,7 +720,7 @@ Decide se os 25 erros de schema do bench são do modelo ou só do bench.
 
 **Arquivos:** Criar `scripts/probe-read-offset.mjs` (descartável; não commitar)
 
-- [ ] **Passo 1: servidor falso que pede `Read` com `offset: 0`**
+- [x] **Passo 1: servidor falso que pede `Read` com `offset: 0`**
 
 ```js
 // Fake Anthropic: asks Claude Code for Read {offset: 0} and prints the tool_result it gets back.
@@ -730,7 +761,7 @@ createServer(async (req, res) => {
 }).listen(18560, '127.0.0.1', () => console.log('fake anthropic on 18560'));
 ```
 
-- [ ] **Passo 2: rodar contra o Claude Code real**
+- [x] **Passo 2: rodar contra o Claude Code real**
 
 ```bash
 node scripts/probe-read-offset.mjs "$TEMP/probe-read.txt" &
@@ -739,12 +770,12 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:18560 ANTHROPIC_API_KEY=local-test-key claud
 
 Expected: uma linha `TOOL_RESULT`.
 
-- [ ] **Passo 3: decidir pela saída**
+- [x] **Passo 3: decidir pela saída**
 
 - `TOOL_RESULT` com o conteúdo do arquivo: o Claude Code aceita `offset: 0`. Em `scripts/bench/harness.ts`, trocar `offset: z.number().int().min(1).optional()` por `offset: z.number().int().min(0).optional()`, ajustar `readFile` para `const start = Math.max((offset ?? 1) - 1, 0);`, rodar `npm test` e commitar `fix(bench): accept Read offset 0 like Claude Code does`.
 - `TOOL_RESULT` com `InputValidationError`: o bench está certo. Acrescentar à linha do bench no README (Tarefa 13): "Read offset:0 rejected by Claude Code too: one wasted turn per first read". Sem mudança de código.
 
-- [ ] **Passo 4: apagar o script e matar o servidor**
+- [x] **Passo 4: apagar o script e matar o servidor**
 
 ```bash
 rm scripts/probe-read-offset.mjs
@@ -754,18 +785,18 @@ rm scripts/probe-read-offset.mjs
 
 **Arquivos:** Modificar `package.json` (scripts)
 
-- [ ] **Passo 1: script**
+- [x] **Passo 1: script**
 
 ```json
     "coverage": "node --import tsx --test --experimental-test-coverage test/*.test.ts",
 ```
 
-- [ ] **Passo 2: rodar e registrar**
+- [x] **Passo 2: rodar e registrar**
 
 Run: `npm run coverage`
 Expected: tabela por arquivo. Meta: 100% dos ramos em `src/proxy/server.ts`, `src/providers/anthropic.ts`, `src/config.ts` e `src/telemetry/cost.ts`; cerca de 80% de linhas no total. Anotar os números na mensagem do commit.
 
-- [ ] **Passo 3: commit**
+- [x] **Passo 3: commit**
 
 ```bash
 git add package.json
