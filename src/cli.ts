@@ -10,6 +10,7 @@ const USAGE = `Usage: jev-router [command] [options]
 Commands:
   serve            Start the gateway (default)
   stats            Print routing and token-savings statistics from the telemetry database
+  statusline       One line for Claude Code's statusLine: router health and this session's last route
   help             Show this message
 
 Options:
@@ -70,6 +71,18 @@ async function main(argv: string[]): Promise<number> {
         db.close();
       }
       return 0;
+    }
+    case 'statusline': {
+      const { readSessionId, statusLine } = await import('./statusline.js');
+      const sessionId = await readSessionId();
+      const line = await statusLine({
+        dbPath: values.db ?? process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath(),
+        healthUrl: `http://${process.env['HOST'] || '127.0.0.1'}:${process.env['PORT'] || '8787'}/healthz`,
+        ...(sessionId ? { sessionId } : {}),
+      });
+      // Exit once written: a stdin that never closed must not keep the status line hanging.
+      process.stdout.write(`${line}\n`, () => process.exit(0));
+      return -1;
     }
     default:
       console.error(`Unknown command "${command}".\n\n${USAGE}`);
