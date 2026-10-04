@@ -319,6 +319,17 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(row.outcome, 'http_error');
   });
 
+  it('records proxy_error when Anthropic is unreachable', async () => {
+    anthropicHandler = (_seen, res) => void res.socket?.destroy();
+    const res = await claudeCode('T-down', 'refactor the data layer to clean architecture');
+    await res.body.text();
+    assert.equal(res.statusCode, 502);
+    const [row] = await logsFor('T-down');
+    assert.ok(row, 'an Anthropic outage must show up in stats');
+    assert.equal(row.outcome, 'proxy_error');
+    assert.equal(row.httpStatus, 502);
+  });
+
   it('passes count_tokens and unknown endpoints straight to Anthropic', async () => {
     anthropicHandler = (_s, res) => void res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
     const counted = await request(`${proxyUrl}/v1/messages/count_tokens`, {

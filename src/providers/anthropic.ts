@@ -20,14 +20,21 @@ export class AnthropicProvider implements Provider {
   constructor(private readonly options: AnthropicProviderOptions) {}
 
   async send(req: ProviderRequest): Promise<ProviderResult> {
-    const res = await request(`${this.options.baseUrl}${req.url}`, {
-      method: req.method,
-      headers: this.withAuth(req.headers),
-      body: req.rawBody ?? null,
-      signal: req.signal,
-      headersTimeout: this.options.timeoutMs,
-      bodyTimeout: this.options.timeoutMs,
-    });
+    let res;
+    try {
+      res = await request(`${this.options.baseUrl}${req.url}`, {
+        method: req.method,
+        headers: this.withAuth(req.headers),
+        body: req.rawBody ?? null,
+        signal: req.signal,
+        headersTimeout: this.options.timeoutMs,
+        bodyTimeout: this.options.timeoutMs,
+      });
+    } catch (err) {
+      // The client left: nothing to report. Anything else never reached Anthropic.
+      if (req.signal.aborted) throw err;
+      return { kind: 'unavailable', reason: `network: ${(err as Error).message}` };
+    }
     return { kind: 'response', status: res.statusCode, headers: forwardableHeaders(res.headers), body: res.body };
   }
 
