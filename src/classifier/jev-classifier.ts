@@ -11,7 +11,7 @@ import type { ClassificationInput, ComplexityClassifier } from './classifier.js'
  * levels and keep the full distribution — the policy, not the classifier,
  * decides what to do with uncertainty.
  */
-const QUESTION_ID = 'task_complexity';
+export const QUESTION_ID = 'task_complexity';
 
 const COMPLEXITY_CRITERIA = [
   'Simple and self-contained: answering a question, explaining code, a one-file edit, a rename, formatting, a docstring or a single small unit test, running a known command.',
@@ -19,7 +19,8 @@ const COMPLEXITY_CRITERIA = [
   'Structural or complex: Clean Architecture/SOLID refactors across layers, test-suite design with heavy fixtures or mocking, concurrency, security or performance root causes, migrations, ambiguous requirements.',
 ] as const;
 
-const JevResponse = z.looseObject({
+/** The part of the JEV response the adapter depends on. Unknown fields are tolerated. */
+export const JevResponse = z.looseObject({
   answers: z.looseObject({
     [QUESTION_ID]: z.looseObject({
       probabilities: z.record(z.string(), z.number().min(0).max(1)),
@@ -46,17 +47,7 @@ export class JevClassifier implements ComplexityClassifier {
         authorization: `Bearer ${this.options.apiKey}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        model: this.options.model,
-        state: buildState(input),
-        questions: {
-          [QUESTION_ID]: {
-            type: 'score',
-            instructions: 'How complex is this request for an AI coding agent working in the developer repository?',
-            criteria: COMPLEXITY_CRITERIA,
-          },
-        },
-      }),
+      body: JSON.stringify(jevRequestBody(this.options.model, input)),
     });
 
     const payload: unknown = await res.body.json();
@@ -64,9 +55,53 @@ export class JevClassifier implements ComplexityClassifier {
       throw new Error(`JEV HTTP ${res.statusCode}: ${JSON.stringify(payload).slice(0, 300)}`);
     }
 
-    const { probabilities: p } = JevResponse.parse(payload).answers[QUESTION_ID]!;
-    return toDistribution(p['0'] ?? 0, p['1'] ?? 0, p['2'] ?? 0);
+    return parseJevAnswer(payload);
   }
+}
+
+/** Request body for one ordinal complexity question. */
+export function jevRequestBody(model: string, input: ClassificationInput): object {
+  return {
+    model,
+    state: buildState(input),
+    questions: {
+      [QUESTION_ID]: {
+        type: 'score',
+        instructions: 'How complex is this request for an AI coding agent working in the developer repository?',
+        criteria: COMPLEXITY_CRITERIA,
+      },
+    },
+  };
+}
+
+/** Production parsing: schema check, then levels "0" | "1" | "2" (a missing level counts as 0). */
+export function parseJevAnswer(payload: unknown): ComplexityDistribution {
+  const { probabilities: p } = JevResponse.parse(payload).answers[QUESTION_ID]!;
+  return toDistribution(p['0'] ?? 0, p['1'] ?? 0, p['2'] ?? 0);
+}
+
+/**
+ * Strict contract check used by scripts/test-jev-real.ts against production.
+ * Stricter than parseJevAnswer on purpose: it flags what the adapter would
+ * silently tolerate (missing or extra levels, mass that does not sum to 1).
+ * Returns human-readable issues; empty means the contract holds.
+ */
+export function jevContractIssues(payload: unknown): string[] {
+  const parsed = JevResponse.safeParse(payload);
+  if (!parsed.success) {
+    return parsed.error.issues.map((i) => `schema: ${i.path.join('.') || '(root)'}: ${i.message}`);
+  }
+  const p = parsed.data.answers[QUESTION_ID]!.probabilities;
+  const issues: string[] = [];
+  const keys = Object.keys(p).sort();
+  for (const level of ['0', '1', '2']) {
+    if (!(level in p)) issues.push(`probabilities: level "${level}" missing (got keys ${JSON.stringify(keys)})`);
+  }
+  const extra = keys.filter((k) => !['0', '1', '2'].includes(k));
+  if (extra.length > 0) issues.push(`probabilities: unexpected levels ${JSON.stringify(extra)}`);
+  const sum = Object.values(p).reduce((a, b) => a + b, 0);
+  if (Math.abs(sum - 1) > 0.02) issues.push(`probabilities: sum is ${sum.toFixed(4)}, expected 1 ± 0.02`);
+  return issues;
 }
 
 /** JEV consumes unstructured state; give it the request plus the cheap structural signals. */
