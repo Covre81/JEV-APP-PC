@@ -8,6 +8,8 @@ export interface Usage {
   readonly tokensIn: number;
   readonly tokensOut: number;
   readonly cacheReadTokens: number;
+  /** Portion of tokensIn written to the prompt cache (billed at the write premium). */
+  readonly cacheWriteTokens: number;
 }
 
 export interface MeteredBody {
@@ -116,7 +118,12 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
     body: tap,
     usage: () =>
       seen && (input !== undefined || output !== undefined)
-        ? { tokensIn: (input ?? 0) + cacheRead + cacheWrite, tokensOut: output ?? 0, cacheReadTokens: cacheRead }
+        ? {
+            tokensIn: (input ?? 0) + cacheRead + cacheWrite,
+            tokensOut: output ?? 0,
+            cacheReadTokens: cacheRead,
+            cacheWriteTokens: cacheWrite,
+          }
         : undefined,
     sawErrorEvent: () => errorEvent,
     settled,

@@ -80,6 +80,7 @@ export function buildServer({ config, router, providers, telemetry = noopTelemet
       humanText: latestHumanText(base.body!),
       requestClass: single(req.headers, 'x-claude-code-request-class'),
       model: route === 'cheap' ? config.cheap.model : base.body!.model,
+      requestedModel: base.body!.model,
     });
 
     if (decision.route === 'cheap') {

@@ -33,7 +33,7 @@ describe('meterAnthropicBody', () => {
     const m = meterAnthropicBody(chunked(sse), 'text/event-stream', undefined);
     assert.deepEqual(await collect(m.body), sse);
     await m.settled;
-    assert.deepEqual(m.usage(), { tokensIn: 5312, tokensOut: 42, cacheReadTokens: 5000 });
+    assert.deepEqual(m.usage(), { tokensIn: 5312, tokensOut: 42, cacheReadTokens: 5000, cacheWriteTokens: 300 });
     assert.equal(m.sawErrorEvent(), false);
   });
 
@@ -43,7 +43,7 @@ describe('meterAnthropicBody', () => {
     const m = meterAnthropicBody(chunked(gz, 5), 'application/json', 'gzip');
     assert.deepEqual(await collect(m.body), gz);
     await m.settled;
-    assert.deepEqual(m.usage(), { tokensIn: 7, tokensOut: 3, cacheReadTokens: 0 });
+    assert.deepEqual(m.usage(), { tokensIn: 7, tokensOut: 3, cacheReadTokens: 0, cacheWriteTokens: 0 });
   });
 
   it('flags an Anthropic error event inside a 200 stream', async () => {

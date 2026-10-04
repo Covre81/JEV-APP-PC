@@ -40,7 +40,10 @@ export const routerLogs = sqliteTable(
     humanPromptHash: text('human_prompt_hash'),
     jevDecision: text('jev_decision', { mode: 'json' }).$type<JevDecision>(),
     finalProvider: text('final_provider', { enum: ['anthropic', 'openai'] }).notNull(),
+    /** Model that served the request (the cheap model on the cheap route). */
     model: text('model'),
+    /** Model the client asked for: what Anthropic would have run had the request stayed there. */
+    requestedModel: text('requested_model'),
     routeReason: text('route_reason').notNull(),
     requestClass: text('request_class'),
     httpStatus: integer('http_status'),
@@ -50,6 +53,8 @@ export const routerLogs = sqliteTable(
     tokensOut: integer('tokens_out'),
     /** Portion of tokens_in served from the Anthropic prompt cache. */
     cacheReadTokens: integer('cache_read_tokens'),
+    /** Portion of tokens_in written to the Anthropic prompt cache. */
+    cacheWriteTokens: integer('cache_write_tokens'),
     /** Request received → last byte sent to the client. */
     latencyMs: integer('latency_ms').notNull(),
     /** The cheap provider failed before answering and the request fell back to Anthropic. */

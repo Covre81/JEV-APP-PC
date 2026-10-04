@@ -230,6 +230,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.ok(cheapRow);
     assert.equal(cheapRow.finalProvider, 'openai');
     assert.equal(cheapRow.model, 'openai/gpt-oss-20b');
+    assert.equal(cheapRow.requestedModel, 'claude-opus-5-5', 'the baseline prices what Anthropic would have run');
     assert.equal(cheapRow.outcome, 'ok');
     assert.equal(cheapRow.tokensIn, 40);
     assert.equal(cheapRow.tokensOut, 5);
@@ -244,6 +245,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(primaryRow.model, 'claude-opus-5-5');
     assert.equal(primaryRow.tokensIn, 100, 'uncached + cache reads');
     assert.equal(primaryRow.cacheReadTokens, 90);
+    assert.equal(primaryRow.cacheWriteTokens, 0);
     assert.equal(primaryRow.tokensOut, 25);
     assert.equal(primaryRow.httpStatus, 200);
   });

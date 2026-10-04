@@ -13,6 +13,7 @@ export interface ExchangeContext {
   readonly humanText: string | undefined;
   readonly requestClass: string | undefined;
   readonly model: string | undefined;
+  readonly requestedModel: string | undefined;
 }
 
 export interface UpstreamOutcome {
@@ -121,6 +122,7 @@ function record(
     jevDecision: jevDecisionOf(decision),
     finalProvider: decision.route === 'cheap' ? 'openai' : 'anthropic',
     model: ctx.model ?? null,
+    requestedModel: ctx.requestedModel ?? null,
     routeReason: decision.reason,
     requestClass: ctx.requestClass ?? null,
     httpStatus: result.status,
@@ -128,6 +130,7 @@ function record(
     tokensIn: result.usage?.tokensIn ?? null,
     tokensOut: result.usage?.tokensOut ?? null,
     cacheReadTokens: result.usage?.cacheReadTokens ?? null,
+    cacheWriteTokens: result.usage?.cacheWriteTokens ?? null,
     latencyMs: result.latencyMs,
     fallbackTriggered: decision.reason === 'failover:cheap-unavailable',
   });
