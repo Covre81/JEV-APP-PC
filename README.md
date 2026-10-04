@@ -120,7 +120,7 @@ src/
 │   └── headers.ts                 # hop-by-hop filtering, credential extraction
 └── telemetry/                     # cost audit; can never fail or slow a response
     ├── schema.ts                  # `router_logs` row type, SQL migrations, insert
-    ├── db.ts                      # better-sqlite3 + WAL, applies migrations on boot (user_version)
+    ├── db.ts                      # node:sqlite + WAL, applies migrations on boot (user_version)
     ├── usage-meter.ts             # taps the relayed body (SSE/JSON, gzip/br) for `usage`
     ├── audit.ts                   # one row per exchange, recorded after the socket closes
     ├── recorder.ts                # TelemetrySink port; queued, batched SQLite writes
@@ -175,7 +175,6 @@ Code only parses Anthropic events.
 | `fastify` | Raw-buffer bodies with a hard `bodyLimit`, streamed replies, pino logging |
 | `undici` | One HTTP client for all three upstreams. `request()` exposes the raw, non-decompressed stream that the Anthropic passthrough needs |
 | `zod` | Validates env, the body fields we read, and every JEV/OpenAI payload |
-| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot. **Held at `^12`:** v13 ships no prebuilt binaries and needs a C++ toolchain (MSVC) to install on Windows |
 
 Deliberately absent:
 
@@ -184,6 +183,10 @@ Deliberately absent:
 - The OpenAI SDK: two endpoints and a stream translator don't justify it.
 - An LRU library.
 - An ORM: one table, a handful of queries.
+- A SQLite driver package: the cost audit uses Node's built-in `node:sqlite`
+  (one table, plain SQL, migrations as an append-only list applied on boot),
+  so there is no native module to compile. Node 22 and 24 still flag it
+  experimental and print one `ExperimentalWarning` at startup.
 
 ## Setup
 
@@ -343,6 +346,24 @@ Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:
 -- conversations that used both providers (escalated or failed over)
 SELECT session_id FROM router_logs GROUP BY session_id
 HAVING min(final_provider) = 'anthropic' AND max(final_provider) = 'openai';
+```
+
+The cheap route can also fail silently: the model says it is done and the work
+is wrong. The user's tell is sending the same prompt again. Compare that rate
+per provider; if `openai` sits well above `anthropic`, raise the bar further or
+try another model with `bench.ts`:
+
+```sql
+-- Prompts repeated after an answer, by the provider that served the first send.
+WITH firsts AS (
+  SELECT human_prompt_hash, final_provider,
+         count(*) OVER (PARTITION BY human_prompt_hash) AS sends,
+         row_number() OVER (PARTITION BY human_prompt_hash ORDER BY id) AS nth
+  FROM router_logs WHERE human_prompt_hash IS NOT NULL
+)
+SELECT final_provider, count(*) AS prompts, sum(sends > 1) AS repeated,
+       round(100.0 * sum(sends > 1) / count(*), 1) AS repeated_pct
+FROM firsts WHERE nth = 1 GROUP BY final_provider;
 ```
 
 ## Checks against real APIs (local only)
