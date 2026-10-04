@@ -1,4 +1,4 @@
-import type { ComplexityClassifier } from '../classifier/classifier.js';
+import type { Classification, ComplexityClassifier } from '../classifier/classifier.js';
 import type { ComplexityDistribution } from '../domain/complexity.js';
 import { selectRoute, stickyRoute, type PolicyOptions, type Route } from '../domain/policy.js';
 import {
@@ -25,7 +25,7 @@ export interface RouteDecision {
   readonly route: Route;
   readonly reason: RouteReason;
   readonly conversationKey: string | undefined;
-  readonly distribution?: ComplexityDistribution;
+  readonly distribution?: Classification;
   readonly classifierMs?: number;
   readonly classifierError?: string;
 }
@@ -107,7 +107,7 @@ export class Router {
     }
 
     const started = performance.now();
-    let distribution: ComplexityDistribution;
+    let distribution: Classification;
     try {
       distribution = await this.classifier.classify(
         {

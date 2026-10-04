@@ -25,6 +25,8 @@ const row = (over: Partial<CostRow>): CostRow => ({
   tokensOut: 0,
   cacheReadTokens: 0,
   cacheWriteTokens: 0,
+  jevTokensIn: null,
+  jevTokensOut: null,
   ...over,
 });
 
@@ -93,6 +95,15 @@ describe('computeNetCost', () => {
     assert.equal(c.rowsWithoutUsage, 1);
     const unpriced = computeNetCost([row({ requestedModel: 'claude-unknown-9' })], pricingFromEnv({}));
     assert.deepEqual(unpriced.unpricedModels, ['claude-unknown-9']);
+  });
+
+  it('charges JEV classifications at the JEV price and nets them out', () => {
+    const withJev = pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '3', JEV_PRICE_OUTPUT_PER_MTOK: '15' });
+    const c = computeNetCost([row({ jevTokensIn: 1000, jevTokensOut: 100 }), row({})], withJev);
+    close(c.jevUsd, (1000 * 3 + 100 * 15) / M);
+    close(c.netUsd, -c.jevUsd);
+    assert.equal(withJev.jevPriceUnset, false);
+    assert.equal(pricingFromEnv({}).jevPriceUnset, true);
   });
 
   it('resolves list prices by longest prefix', () => {

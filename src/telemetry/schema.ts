@@ -9,6 +9,9 @@ export interface JevDecision {
   /** P(complex) — level 3 ("structural"), the work the primary quota is reserved for. */
   readonly pComplex: number;
   readonly classifierMs: number | null;
+  /** Tokens the JEV call billed; absent on rows written before they were recorded. */
+  readonly tokensIn?: number | null;
+  readonly tokensOut?: number | null;
 }
 
 export type FinalProvider = 'anthropic' | 'openai';

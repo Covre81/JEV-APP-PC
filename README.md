@@ -341,12 +341,16 @@ billed as a cache write.
 | Gross savings | For each request the cheap provider served: warm Anthropic cost minus cheap cost |
 | Cache-miss penalty | First Anthropic request after a cheap one (escalation or fallback): actual cost minus warm cost. Anthropic re-reads the whole history at full input + write price because the cheap turns broke the cache |
 | Failed cheap attempts | Tokens billed by the cheap provider on requests that then fell back |
-| **NET** | baseline − (actual Anthropic + actual cheap). Positive = **PROFIT**, negative = **LOSS** |
+| Classifier (JEV) calls | Tokens each JEV classification billed (from its `usage`), at `JEV_PRICE_*`: the router's own overhead |
+| **NET** | baseline − (actual Anthropic + actual cheap + JEV). Positive = **PROFIT**, negative = **LOSS** |
 
 Prices: Anthropic list prices per model (built-in table, override with
 `PRIMARY_PRICE_*`). The cheap provider price defaults to $0, which is right
 only for a local model; set `CHEAP_PRICE_INPUT_PER_MTOK` and
 `CHEAP_PRICE_OUTPUT_PER_MTOK` for Groq or OpenRouter, otherwise `stats` warns.
+TypeSafe bills JEV per token: set `JEV_PRICE_INPUT_PER_MTOK` and
+`JEV_PRICE_OUTPUT_PER_MTOK` from your plan, otherwise `stats` warns once JEV has
+scored a request. A failed JEV call reports no usage and is not counted.
 On a Claude subscription the dollars are API-equivalent quota, not a bill.
 
 Known limits:

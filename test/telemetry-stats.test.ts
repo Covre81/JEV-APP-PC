@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import { inTransaction, openTelemetryDb, userVersion } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
 import { MIGRATIONS, type NewRouterLog } from '../src/telemetry/schema.js';
+import { pricingFromEnv } from '../src/telemetry/pricing.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
 
 const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
@@ -24,7 +25,7 @@ describe('telemetry → stats', () => {
   it('aggregates diversion, fallbacks, repeats and estimated savings', async () => {
     const db = openTelemetryDb(':memory:');
     const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
-    const jev = { simple: 0.9, standard: 0.07, structural: 0.03, pSimple: 0.9, pComplex: 0.03, classifierMs: 80 };
+    const jev = { simple: 0.9, standard: 0.07, structural: 0.03, pSimple: 0.9, pComplex: 0.03, classifierMs: 80, tokensIn: 453, tokensOut: 20 };
 
     sink.record(row({ finalProvider: 'openai', jevDecision: jev, humanPromptHash: 'h1', tokensIn: 1000, tokensOut: 200 }));
     sink.record(row({ finalProvider: 'openai', humanPromptHash: 'h1', tokensIn: 500, tokensOut: 50 }));
@@ -44,6 +45,11 @@ describe('telemetry → stats', () => {
     assert.equal(all.repeatedPrompts, 1);
     assert.equal(all.repeatedSends, 1);
     assert.equal(all.estimatedTokensSaved, 1750, 'only cheap requests served OK count');
+
+    const priced = computeStats(db, { pricing: pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '1', JEV_PRICE_OUTPUT_PER_MTOK: '10' }) });
+    assert.ok(Math.abs(priced.cost.jevUsd - (453 * 1 + 20 * 10) / 1_000_000) < 1e-12, 'JEV tokens come from jev_decision');
+    assert.match(renderStats(priced), /Classifier \(JEV\)/);
+    assert.match(renderStats(all), /JEV priced at \$0/);
 
     const recent = computeStats(db, { since: new Date('2026-09-15T00:00:00Z') });
     assert.equal(recent.total, 4);
