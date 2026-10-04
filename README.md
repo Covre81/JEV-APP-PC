@@ -92,8 +92,9 @@ only on work that needs Claude**.
 
 ```
 src/
-├── cli.ts                         # `jev-router` binary: serve | stats | help; env-file loading
+├── cli.ts                         # `jev-router` binary: serve | stats | statusline | help; env-file loading
 ├── serve.ts                       # composition root (only file that knows concrete classes)
+├── statusline.ts                  # `jev-router statusline`: health probe + session's last route
 ├── config.ts                      # zod-validated env → typed Config; fails fast at boot
 ├── paths.ts                       # ~/.jev-router (or $JEV_ROUTER_HOME): .env + telemetry.db
 ├── domain/                        # pure, no I/O
@@ -124,7 +125,8 @@ src/
     ├── usage-meter.ts             # taps the relayed body (SSE/JSON, gzip/br) for `usage`
     ├── audit.ts                   # one row per exchange, recorded after the socket closes
     ├── recorder.ts                # TelemetrySink port; queued, batched SQLite writes
-    └── stats.ts                   # aggregates + table for `jev-router stats`
+    ├── stats.ts                   # aggregates + table for `jev-router stats`
+    └── statusline.ts              # last route per session, today's cheap share, the rendered line
 ```
 
 The router returns a decision (`cheap` | `primary`) and knows nothing about
@@ -279,6 +281,26 @@ are never sent to it.
   subscription. Only cheap-routed turns leave it.
 - **Other clients:** point the base URL at `http://127.0.0.1:8787`. Without
   session headers, conversations are keyed by a hash of their first message.
+
+**Status line.** To see under every Claude Code prompt whether the router is
+up and where the session's last turn went, add to the same `settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node C:/Dev/JEV-APP-PC/dist/cli.js statusline --env C:/Dev/JEV-APP-PC/.env"
+  }
+}
+```
+
+It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
+`jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms. The
+reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
+asked (`sticky`, `auxiliary`, …). Pass `--env` explicitly: the status line runs
+in each project's directory, and that project's own `.env` could set another
+`PORT`. Adjust the paths to your checkout (or use `jev-router statusline` after
+`npm link`).
 
 ## Telemetry and cost audit
 
