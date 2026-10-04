@@ -100,6 +100,8 @@ describe('bench harness through OpenAICompatibleProvider', () => {
     assert.equal(r.counters.hallucinatedTool, 1);
     assert.equal(r.counters.schemaViolation, 1);
     assert.equal(r.counters.editMiss, 1);
+    assert.equal(r.toolErrors.length, 3);
+    assert.match(r.toolErrors[1] ?? '', /^Read\(\{"file_path":"math.ts"\}\): InputValidationError: .*absolute path/);
   });
 
   it('reports invalid tool JSON as stream_error (too late for the router to fail over)', async () => {
@@ -149,7 +151,7 @@ describe('Workspace', () => {
 
 describe('summarize', () => {
   it('separates provider failures from wrong work', () => {
-    const base = { detail: undefined, steps: 1, toolCalls: [], latencyMs: 10, inputTokens: 0, outputTokens: 0 };
+    const base = { toolErrors: [], detail: undefined, steps: 1, toolCalls: [], latencyMs: 10, inputTokens: 0, outputTokens: 0 };
     const counters = { hallucinatedTool: 0, schemaViolation: 1, fileNotFound: 0, editWithoutRead: 0, editMiss: 0, disallowedTool: 0 };
     const s = summarize('m', [
       { ...base, task: 'a', outcome: 'success', counters },

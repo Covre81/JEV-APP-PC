@@ -3,7 +3,7 @@
  * through the real OpenAICompatibleProvider against CHEAP_BASE_URL.
  *
  *   npx tsx scripts/bench.ts [--env <file>] [--trials 3] [--task fix-bug,rename]
- *                            [--pad-kb 16] [--max-steps 8] [--min-success 0.8]
+ *                            [--pad-kb 16] [--max-steps 12] [--min-success 0.8]
  *                            [--model <id>] [--json]
  *
  * Needs CHEAP_BASE_URL, CHEAP_API_KEY (any non-empty string for Ollama) and
@@ -38,7 +38,7 @@ async function main(): Promise<number> {
       trials: { type: 'string', default: '3' },
       task: { type: 'string' },
       'pad-kb': { type: 'string', default: '16' },
-      'max-steps': { type: 'string', default: '8' },
+      'max-steps': { type: 'string', default: '12' },
       'min-success': { type: 'string', default: '0.8' },
       model: { type: 'string' },
       json: { type: 'boolean', default: false },

@@ -97,6 +97,8 @@ export class Workspace {
   readonly files: Map<string, string>;
   private readonly read = new Set<string>();
   readonly counters = zeroCounters();
+  /** Every failed call as `Tool(input): first line of the error`, in call order. */
+  readonly errors: string[] = [];
 
   constructor(initial: Readonly<Record<string, string>>) {
     this.files = new Map(Object.entries(initial).map(([name, text]) => [`${ROOT}/${name}`, text]));
@@ -107,6 +109,15 @@ export class Workspace {
   }
 
   run(name: string, input: unknown): ToolOutcome {
+    const out = this.dispatch(name, input);
+    if (out.isError) {
+      const message = out.content.replace(/<\/?tool_use_error>/g, '').replace(/\n/g, ' | ');
+      this.errors.push(`${name}(${JSON.stringify(input)?.slice(0, 160)}): ${message.slice(0, 200)}`);
+    }
+    return out;
+  }
+
+  private dispatch(name: string, input: unknown): ToolOutcome {
     if (!(name in ToolInputs)) {
       this.counters.hallucinatedTool++;
       return fail(`Error: No such tool available: ${name}`);
@@ -336,6 +347,7 @@ export interface TrialResult {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly counters: Counters;
+  readonly toolErrors: readonly string[];
 }
 
 export interface TrialOptions {
@@ -399,6 +411,7 @@ export async function runTrial(provider: Provider, task: BenchTask, options: Tri
     inputTokens,
     outputTokens,
     counters: { ...ws.counters },
+    toolErrors: [...ws.errors],
   });
 
   for (let step = 1; step <= options.maxSteps; step++) {
@@ -566,6 +579,11 @@ export function renderSummary(s: BenchSummary, minSuccess: number): string {
     `tool errors          hallucinated=${c.hallucinatedTool} schema=${c.schemaViolation} file_not_found=${c.fileNotFound} ` +
       `edit_without_read=${c.editWithoutRead} edit_miss=${c.editMiss} bash=${c.disallowedTool}`,
   );
+  const errors = s.results.flatMap((r) => r.toolErrors.map((e) => `${r.task}: ${e}`));
+  if (errors.length > 0) {
+    lines.push('', `tool error samples (${Math.min(errors.length, 12)} of ${errors.length}):`);
+    for (const e of errors.slice(0, 12)) lines.push(`  ${e}`);
+  }
   const failures = s.results.filter((r) => r.outcome !== 'success');
   if (failures.length > 0) {
     lines.push('', 'failures:');
