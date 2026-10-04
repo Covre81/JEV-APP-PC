@@ -22,10 +22,20 @@ export interface PolicyOptions {
  * depth. We send work to the cheap provider only when the probability mass of
  * cheap-eligible levels clears the bar; everything else stays on the primary.
  */
-export function selectRoute(d: ComplexityDistribution, options: PolicyOptions): Route {
+export function selectRoute(d: ComplexityDistribution & { readonly risk?: number }, options: PolicyOptions): Route {
+  if ((d.risk ?? 0) >= MAX_CHEAP_RISK) return 'primary';
   const cheapMass = options.standardRoute === 'cheap' ? d.simple + d.standard : d.simple;
   return cheapMass >= options.minCheapProbability ? 'cheap' : 'primary';
 }
+
+/**
+ * A short request can be risky ("store the Stripe key in the code"): JEV calls
+ * it simple, and it is, for the wrong reason. On scripts/eval-jev.ts the risk
+ * Nouls split cleanly (simple prompts <= 0.15, risky >= 0.92), so 0.5 is not
+ * a tuned knob.
+ */
+// ponytail: fixed bar, make it a PolicyOptions field if the eval ever puts cases near it
+const MAX_CHEAP_RISK = 0.5;
 
 /**
  * Escalate-only: once a conversation reaches the primary provider it stays

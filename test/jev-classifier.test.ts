@@ -35,6 +35,8 @@ describe('JevClassifier', () => {
                     probabilities: { '0': 0.6, '1': 0.3, '2': 0.1 },
                     confidence: 0.9,
                   },
+                  security_sensitive: { type: 'noul', noul: 0.03 },
+                  destructive_or_production: { type: 'noul', noul: 0.97 },
                 },
                 usage: { input_tokens: 453, output_tokens: 20 },
               }
@@ -60,10 +62,19 @@ describe('JevClassifier', () => {
     assert.equal(lastRequest?.body.questions.task_complexity.criteria.length, 3);
   });
 
-  it('reports the JEV token usage so the classification can be priced', async () => {
+  it('asks the risk Nouls in the same call and reports the highest', async () => {
+    const jev = new JevClassifier({ apiUrl: url, apiKey: 'ts_test', model: 'jev-latest' });
+    const scores = await jev.classify(input, AbortSignal.timeout(1_000));
+    assert.equal(lastRequest?.body.questions.security_sensitive.type, 'noul');
+    assert.equal(lastRequest?.body.questions.destructive_or_production.type, 'noul');
+    assert.equal(scores.risk, 0.97);
+  });
+
+  it('reports the JEV token usage and the model version that answered', async () => {
     const jev = new JevClassifier({ apiUrl: url, apiKey: 'ts_test', model: 'jev-latest' });
     const scores = await jev.classify(input, AbortSignal.timeout(1_000));
     assert.deepEqual(scores.usage, { inputTokens: 453, outputTokens: 20 });
+    assert.equal(scores.model, 'jev-1.13.0');
   });
 
   it('rejects on non-200 so the router can fail open', async () => {
@@ -75,7 +86,9 @@ describe('JevClassifier', () => {
 });
 
 describe('jevContractIssues', () => {
-  const answer = (probabilities: unknown) => ({ answers: { task_complexity: { probabilities } } });
+  const answer = (probabilities: unknown) => ({
+    answers: { task_complexity: { probabilities }, security_sensitive: { noul: 0 }, destructive_or_production: { noul: 0 } },
+  });
 
   it('accepts three levels that sum to 1', () => {
     assert.deepEqual(jevContractIssues(answer({ '0': 0.6, '1': 0.3, '2': 0.1 })), []);
@@ -87,6 +100,11 @@ describe('jevContractIssues', () => {
     assert.ok(issues.some((i) => i.includes('level "2" missing')));
     assert.ok(issues.some((i) => i.includes('unexpected levels ["3"]')));
     assert.ok(issues.some((i) => i.includes('sum is 0.9500')));
+  });
+
+  it('flags a missing risk Noul, which the classifier would reject', () => {
+    const issues = jevContractIssues({ answers: { task_complexity: { probabilities: { '0': 1, '1': 0, '2': 0 } } } });
+    assert.ok(issues.some((i) => i.startsWith('risk: answers.security_sensitive')));
   });
 
   it('reports schema breaks with their path', () => {

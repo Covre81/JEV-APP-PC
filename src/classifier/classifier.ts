@@ -12,6 +12,10 @@ export interface ClassificationInput {
 /** A distribution plus, when the classifier is a paid API, the tokens that call billed. */
 export type Classification = ComplexityDistribution & {
   readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
+  /** P(the turn is security-sensitive or destructive); a high value vetoes the cheap route. */
+  readonly risk?: number;
+  /** Versioned model that answered (an alias like `jev-latest` resolves to it). */
+  readonly model?: string;
 };
 
 /**

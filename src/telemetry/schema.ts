@@ -12,6 +12,10 @@ export interface JevDecision {
   /** Tokens the JEV call billed; absent on rows written before they were recorded. */
   readonly tokensIn?: number | null;
   readonly tokensOut?: number | null;
+  /** Highest risk Noul; >= 0.5 forced the primary route. Absent on older rows. */
+  readonly risk?: number | null;
+  /** Versioned JEV model that scored the turn; absent on older rows. */
+  readonly model?: string | null;
 }
 
 export type FinalProvider = 'anthropic' | 'openai';
