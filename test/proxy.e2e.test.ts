@@ -71,6 +71,20 @@ const openAiCutMidStream: Handler = (_seen, res) => {
   res.end('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n');
 };
 
+
+/** Non-streaming chat completion: what the cheap provider returns when Claude Code retries without a stream. */
+const openAiJson: Handler = (_seen, res) => {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ choices: [{ message: { content: 'Hi' }, finish_reason: 'stop' }], usage: { prompt_tokens: 40, completion_tokens: 5 } }));
+};
+
+/** A tool-result continuation: not a fresh conversation, so the router reuses the sticky route. */
+const toolLoop = (text: string) => [
+  { role: 'user', content: [{ type: 'text', text }] },
+  { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/r/README.md' } }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Teh readme' }] },
+];
+
 const openAi503: Handler = (_seen, res) => {
   res.writeHead(503, { 'content-type': 'application/json' }).end('{"error":{"message":"over capacity"}}');
 };
@@ -132,7 +146,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     cheapHandler = openAiStream;
   });
 
-  const claudeCode = (sessionId: string, text: string, messages: object[] = [{ role: 'user', content: [{ type: 'text', text }] }]) =>
+  const claudeCode = (sessionId: string, turn: string | object[], { stream = true } = {}) =>
     request(`${proxyUrl}/v1/messages?beta=true`, {
       method: 'POST',
       headers: {
@@ -146,9 +160,9 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
       body: JSON.stringify({
         model: 'claude-opus-5-5',
         max_tokens: 64_000,
-        stream: true,
+        stream,
         system: [{ type: 'text', text: 'You are Claude Code' }],
-        messages,
+        messages: typeof turn === 'string' ? [{ role: 'user', content: [{ type: 'text', text: turn }] }] : turn,
       }),
     });
 
@@ -194,29 +208,39 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     await res.body.text();
     assert.equal(res.statusCode, 200);
     assert.equal(res.headers['x-jev-route'], 'primary; reason=failover:cheap-unavailable');
-    assert.equal(anthropicLog.length, 1);
+
+    const next = await claudeCode('S-down', toolLoop('fix the typo'));
+    await next.body.text();
+    assert.equal(next.headers['x-jev-route'], 'primary; reason=sticky');
+    assert.equal(cheapLog.length, 1, 'the cheap provider is not tried again');
+    assert.equal(anthropicLog.length, 2);
   });
 
-  it('ends a stream cut mid-way with an error event and sends Claude Code’s retry to Anthropic', async () => {
+  it("ends a stream cut mid-way with an error event and sends Claude Code's retry to Anthropic", async () => {
     await (await claudeCode('S-cut', 'fix the typo')).body.text();
-    const toolLoop = [
-      { role: 'user', content: [{ type: 'text', text: 'fix the typo' }] },
-      { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/r/README.md' } }] },
-      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Teh readme' }] },
-    ];
 
     cheapHandler = openAiCutMidStream;
-    const broken = await claudeCode('S-cut', '', toolLoop);
+    const broken = await claudeCode('S-cut', toolLoop('fix the typo'));
     const text = await broken.body.text();
     assert.equal(broken.headers['x-jev-route'], 'cheap; reason=sticky');
     assert.match(text, /event: error\ndata: \{"type":"error","error":\{"type":"api_error"/);
 
-    // Claude Code re-sends the same turn (verified on 2.1.289: as a non-streaming request).
-    const retry = await claudeCode('S-cut', '', toolLoop);
+    // Claude Code 2.1.289 re-sends the same turn as a non-streaming request.
+    const retry = await claudeCode('S-cut', toolLoop('fix the typo'), { stream: false });
     await retry.body.text();
     assert.equal(retry.headers['x-jev-route'], 'primary; reason=sticky');
     assert.equal(cheapLog.length, 2, 'the cheap provider is not tried again');
     assert.equal(anthropicLog.length, 1);
+  });
+
+  it('re-classifies the retry of a first turn cut mid-stream (ADR rule 4: the pin does not hold)', async () => {
+    cheapHandler = openAiCutMidStream;
+    await (await claudeCode('S-cut-first', 'fix the typo')).body.text();
+
+    cheapHandler = openAiJson;
+    const retry = await claudeCode('S-cut-first', 'fix the typo', { stream: false });
+    await retry.body.text();
+    assert.equal(retry.headers['x-jev-route'], 'cheap; reason=classified');
   });
 
   it('fails over to the cheap provider when the primary quota is exhausted (opt-in)', async () => {
