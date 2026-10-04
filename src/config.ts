@@ -59,7 +59,7 @@ const Env = z
     }
   });
 
-export type Config = ReturnType<typeof loadConfig>;
+export type Config = Readonly<ReturnType<typeof loadConfig>>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -108,6 +108,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,
       sessionTtlMs: e.SESSION_TTL_MS,
     },
+    // dbPath is undefined when telemetry is disabled.
     telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
   };
 }
