@@ -119,10 +119,9 @@ export class Router {
         AbortSignal.timeout(this.options.classifierTimeoutMs),
       );
     } catch (err) {
+      // An unscored human turn may be structural: fail toward primary even mid-conversation.
       const classifierError = err instanceof Error ? err.message : String(err);
-      return sticky
-        ? resolve(sticky, 'sticky', { classifierError })
-        : primary('passthrough:classifier-failed', { classifierError });
+      return resolve('primary', 'passthrough:classifier-failed', { classifierError });
     }
     const classifierMs = Math.round(performance.now() - started);
 
