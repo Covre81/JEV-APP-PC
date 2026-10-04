@@ -143,6 +143,14 @@ describe('Workspace', () => {
     assert.equal(ws.counters.schemaViolation, 1);
   });
 
+  it('reads from the first line on offset 0, like Claude Code', () => {
+    const ws = new Workspace({ 'a.ts': 'one\ntwo' });
+    const out = ws.run('Read', { file_path: '/workspace/a.ts', offset: 0, limit: 1 });
+    assert.equal(out.isError, false);
+    assert.match(out.content, /^ +1→one$/);
+    assert.equal(ws.counters.schemaViolation, 0);
+  });
+
   it('exposes every tool with a JSON schema', () => {
     assert.deepEqual(TOOLS.map((t) => t.name), ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash']);
     assert.ok(TOOLS.every((t) => t.input_schema['type'] === 'object' && !('$schema' in t.input_schema)));

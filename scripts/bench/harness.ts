@@ -22,7 +22,8 @@ const absolutePath = z.string().refine((p) => p.startsWith('/'), 'file_path must
 const ToolInputs = {
   Read: z.strictObject({
     file_path: absolutePath,
-    offset: z.number().int().min(1).optional(),
+    // Claude Code 2.1.289 accepts offset 0 and reads from the first line.
+    offset: z.number().int().min(0).optional(),
     limit: z.number().int().positive().optional(),
   }),
   Edit: z.strictObject({
@@ -156,7 +157,7 @@ export class Workspace {
       return fail(`File does not exist: ${file_path}`);
     }
     this.read.add(file_path);
-    const start = (offset ?? 1) - 1;
+    const start = Math.max((offset ?? 1) - 1, 0);
     const lines = text.split('\n').slice(start, limit === undefined ? undefined : start + limit);
     return ok(lines.map((line, i) => `${String(start + i + 1).padStart(6)}→${line}`).join('\n'));
   }
