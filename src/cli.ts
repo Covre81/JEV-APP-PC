@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { loadConfig } from './config.js';
-import { defaultTelemetryDbPath, jevHome } from './paths.js';
+import { loadEnv } from './env.js';
+import { defaultTelemetryDbPath } from './paths.js';
 
 const USAGE = `Usage: jev-router [command] [options]
 
@@ -19,23 +19,6 @@ Options:
   --json           stats: machine-readable output
 
 Variables already set in the shell win over the env file.`;
-
-/** Shell > explicit --env > ./.env > ~/.jev-router/.env (process.loadEnvFile never overwrites). */
-function loadEnv(explicit: string | undefined): string | undefined {
-  if (explicit) {
-    const file = resolve(explicit);
-    if (!existsSync(file)) throw new Error(`env file not found: ${file}`);
-    process.loadEnvFile(file);
-    return file;
-  }
-  for (const file of [resolve('.env'), join(jevHome(), '.env')]) {
-    if (existsSync(file)) {
-      process.loadEnvFile(file);
-      return file;
-    }
-  }
-  return undefined;
-}
 
 async function main(argv: string[]): Promise<number> {
   const { positionals, values } = parseArgs({
