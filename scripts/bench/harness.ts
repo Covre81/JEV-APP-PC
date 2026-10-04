@@ -332,8 +332,8 @@ export const TASKS: readonly BenchTask[] = [
  * - fallback: the provider refused before the first byte. The router sends
  *   this turn to Anthropic (cost: full-price history re-send).
  * - stream_error: the stream broke after it started (e.g. invalid tool JSON).
- *   The router sends an error event; Claude Code retries and the retry goes
- *   to Anthropic (cost: full-price history re-send).
+ *   The router sends an error event; Claude Code retries, and the retry goes
+ *   to Anthropic except on a first turn, which is re-classified (ADR rule 4).
  * - truncated: stop_reason max_tokens or refusal.
  */
 export type TrialOutcome = 'success' | 'wrong_result' | 'max_steps' | 'fallback' | 'stream_error' | 'truncated';

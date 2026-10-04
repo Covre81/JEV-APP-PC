@@ -175,7 +175,7 @@ Code only parses Anthropic events.
 | `fastify` | Raw-buffer bodies with a hard `bodyLimit`, streamed replies, pino logging |
 | `undici` | One HTTP client for all three upstreams. `request()` exposes the raw, non-decompressed stream that the Anthropic passthrough needs |
 | `zod` | Validates env, the body fields we read, and every JEV/OpenAI payload |
-| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot |
+| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot. **Held at `^12`:** v13 ships no prebuilt binaries and needs a C++ toolchain (MSVC) to install on Windows |
 
 Deliberately absent:
 
@@ -371,7 +371,7 @@ trial ends as:
 | `success` | Task verified |
 | `wrong_result` / `max_steps` | Protocol fine, work wrong: silent quality loss |
 | `fallback` | Refused before the first byte: the turn goes to Anthropic |
-| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event, Claude Code retries and the retry goes to Anthropic |
+| `stream_error` | Stream broke after it started (e.g. invalid tool JSON): the client gets an `error` event and Claude Code retries; the retry goes to Anthropic, except on a conversation's first turn, where it is re-classified (ADR rule 4) |
 | `truncated` | `max_tokens` or refusal |
 
 ```bash
