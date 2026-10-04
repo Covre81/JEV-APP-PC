@@ -354,6 +354,23 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(row.httpStatus, 502);
   });
 
+  it('records client_abort when Claude Code hangs up mid-stream', async () => {
+    anthropicHandler = async (_seen, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1,"output_tokens":0}}}\n\n');
+      await sleep(500);
+      res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+    };
+    const res = await claudeCode('T-abort', 'refactor the data layer to clean architecture');
+    for await (const _chunk of res.body) {
+      res.body.destroy();
+      break;
+    }
+    const [row] = await logsFor('T-abort');
+    assert.ok(row);
+    assert.equal(row.outcome, 'client_abort');
+  });
+
   it('passes count_tokens and unknown endpoints straight to Anthropic', async () => {
     anthropicHandler = (_s, res) => void res.writeHead(200, { 'content-type': 'application/json' }).end('{"input_tokens":12}');
     const counted = await request(`${proxyUrl}/v1/messages/count_tokens`, {
