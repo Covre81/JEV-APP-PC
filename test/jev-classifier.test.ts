@@ -60,10 +60,11 @@ describe('JevClassifier', () => {
     assert.equal(lastRequest?.body.questions.task_complexity.criteria.length, 3);
   });
 
-  it('reports the JEV token usage so the classification can be priced', async () => {
+  it('reports the JEV token usage and the model version that answered', async () => {
     const jev = new JevClassifier({ apiUrl: url, apiKey: 'ts_test', model: 'jev-latest' });
     const scores = await jev.classify(input, AbortSignal.timeout(1_000));
     assert.deepEqual(scores.usage, { inputTokens: 453, outputTokens: 20 });
+    assert.equal(scores.model, 'jev-1.13.0');
   });
 
   it('rejects on non-200 so the router can fail open', async () => {

@@ -46,6 +46,7 @@ export function jevDecisionOf(decision: RouteDecision): JevDecision | null {
     classifierMs: decision.classifierMs ?? null,
     tokensIn: d.usage?.inputTokens ?? null,
     tokensOut: d.usage?.outputTokens ?? null,
+    model: d.model ?? null,
   };
 }
 

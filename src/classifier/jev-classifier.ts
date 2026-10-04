@@ -33,6 +33,9 @@ const JevUsage = z.looseObject({
   usage: z.looseObject({ input_tokens: z.number().int().min(0), output_tokens: z.number().int().min(0) }),
 });
 
+/** Versioned model that answered, read leniently like the usage. */
+const JevModel = z.looseObject({ model: z.string().min(1) });
+
 export interface JevClassifierOptions {
   readonly apiUrl: string;
   readonly apiKey: string;
@@ -61,11 +64,13 @@ export class JevClassifier implements ComplexityClassifier {
     }
 
     const usage = JevUsage.safeParse(payload);
+    const model = JevModel.safeParse(payload);
     return {
       ...parseJevAnswer(payload),
       ...(usage.success
         ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
         : {}),
+      ...(model.success ? { model: model.data.model } : {}),
     };
   }
 }
