@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import type { Route } from './domain/policy.js';
 import { defaultTelemetryDbPath } from './paths.js';
 
 const bool = z.enum(['true', 'false']).transform((v) => v === 'true');
@@ -36,11 +35,9 @@ const Env = z
 
     ROUTER_MIN_CHEAP_PROBABILITY: z.coerce.number().min(0).max(1).default(0.8),
     ROUTER_STANDARD_ROUTE: z.enum(['primary', 'cheap']).default('primary'),
-    ROUTER_ALLOW_ESCALATION: bool.default(true),
     ROUTER_PRIMARY_CLASSES: csv.default(new Set(['auxiliary', 'compaction'])),
     FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(false),
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
-    SESSION_MAX_ENTRIES: z.coerce.number().int().positive().default(10_000),
 
     TELEMETRY_ENABLED: bool.default(true),
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
@@ -62,45 +59,10 @@ const Env = z
     }
   });
 
-export type Config = Readonly<{
-  host: string;
-  port: number;
-  logLevel: z.infer<typeof Env>['LOG_LEVEL'];
-  primary: Readonly<{
-    baseUrl: string;
-    authMode: 'passthrough' | 'inject';
-    apiKey: string | undefined;
-    timeoutMs: number;
-  }>;
-  cheap: Readonly<{
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    maxOutputTokens: number;
-    contextTokens: number;
-    timeoutMs: number;
-  }>;
-  proxyAuthToken: string | undefined;
-  bodyLimitBytes: number;
-  classifier: Readonly<
-    | { kind: 'jev'; apiUrl: string; apiKey: string; model: string; timeoutMs: number; maxChars: number }
-    | { kind: 'heuristic'; timeoutMs: number; maxChars: number }
-  >;
-  router: Readonly<{
-    minCheapProbability: number;
-    standardRoute: Route;
-    allowEscalation: boolean;
-    primaryClasses: ReadonlySet<string>;
-    failoverOnPrimaryRateLimit: boolean;
-    sessionTtlMs: number;
-    sessionMaxEntries: number;
-  }>;
-  /** dbPath is undefined when telemetry is disabled. */
-  telemetry: Readonly<{ dbPath: string | undefined }>;
-}>;
+export type Config = ReturnType<typeof loadConfig>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = Env.safeParse(env);
   if (!parsed.success) {
     throw new Error(`Invalid configuration:\n${z.prettifyError(parsed.error)}`);
@@ -131,22 +93,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     classifier:
       e.CLASSIFIER === 'jev'
         ? {
-            kind: 'jev',
+            kind: 'jev' as const,
             apiUrl: e.JEV_API_URL,
             apiKey: e.TYPESAFE_API_KEY!,
             model: e.JEV_MODEL,
             timeoutMs: e.JEV_TIMEOUT_MS,
             maxChars: e.CLASSIFIER_MAX_CHARS,
           }
-        : { kind: 'heuristic', timeoutMs: e.JEV_TIMEOUT_MS, maxChars: e.CLASSIFIER_MAX_CHARS },
+        : { kind: 'heuristic' as const, timeoutMs: e.JEV_TIMEOUT_MS, maxChars: e.CLASSIFIER_MAX_CHARS },
     router: {
       minCheapProbability: e.ROUTER_MIN_CHEAP_PROBABILITY,
       standardRoute: e.ROUTER_STANDARD_ROUTE,
-      allowEscalation: e.ROUTER_ALLOW_ESCALATION,
       primaryClasses: e.ROUTER_PRIMARY_CLASSES,
       failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,
       sessionTtlMs: e.SESSION_TTL_MS,
-      sessionMaxEntries: e.SESSION_MAX_ENTRIES,
     },
     telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
   };

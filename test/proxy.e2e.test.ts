@@ -101,7 +101,6 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     });
     const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
-      allowEscalation: true,
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,
       classifierTimeoutMs: 1_000,

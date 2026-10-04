@@ -21,11 +21,10 @@ class ScriptedClassifier implements ComplexityClassifier {
   }
 }
 
-function setup(script: () => ComplexityDistribution | Error, allowEscalation = true) {
+function setup(script: () => ComplexityDistribution | Error) {
   const classifier = new ScriptedClassifier(script);
   const router = new Router(classifier, new TtlLruStore<Route>(100, 60_000), {
     policy: { minCheapProbability: 0.8, standardRoute: 'primary' },
-    allowEscalation,
     primaryClasses: new Set(['auxiliary', 'compaction']),
     cheapContextTokens: 100_000,
     classifierTimeoutMs: 1_000,

@@ -42,7 +42,6 @@ export interface RequestContext {
 
 export interface RouterOptions {
   readonly policy: PolicyOptions;
-  readonly allowEscalation: boolean;
   /** x-claude-code-request-class values that always use the primary provider. */
   readonly primaryClasses: ReadonlySet<string>;
   /** Input-token budget of the cheap model (its context window minus headroom). */
@@ -106,7 +105,6 @@ export class Router {
     if (humanText === undefined) {
       return sticky ? resolve(sticky, 'sticky') : primary('passthrough:no-session-state');
     }
-    if (sticky && !this.options.allowEscalation) return resolve(sticky, 'sticky');
 
     const started = performance.now();
     let distribution: ComplexityDistribution;

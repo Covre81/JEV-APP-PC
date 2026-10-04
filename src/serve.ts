@@ -24,10 +24,9 @@ export async function serve(config: Config): Promise<void> {
 
   const router = new Router(
     classifier,
-    new TtlLruStore<Route>(config.router.sessionMaxEntries, config.router.sessionTtlMs),
+    new TtlLruStore<Route>(10_000, config.router.sessionTtlMs),
     {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
-      allowEscalation: config.router.allowEscalation,
       primaryClasses: config.router.primaryClasses,
       // Input budget: 90% of the window, minus the output tokens we reserve.
       cheapContextTokens: Math.floor(config.cheap.contextTokens * 0.9) - config.cheap.maxOutputTokens,
