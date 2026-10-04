@@ -1,4 +1,4 @@
-import type { TelemetryDb } from './db.js';
+import { inTransaction, type TelemetryDb } from './db.js';
 import { INSERT_ROUTER_LOG, insertParams, type NewRouterLog } from './schema.js';
 
 /** Port: where routing telemetry goes. `record` must never block or throw. */
@@ -24,7 +24,7 @@ export interface SqliteTelemetryOptions {
 /**
  * Fire-and-forget SQLite sink.
  *
- * better-sqlite3 is synchronous, so writing inline would put disk I/O on the
+ * node:sqlite is synchronous, so writing inline would put disk I/O on the
  * event loop of the request being answered. Instead `record` only pushes to an
  * in-memory queue; a timer (unref'd, so it never keeps the process alive)
  * writes the queue in one transaction. One fsync per batch instead of per row.
@@ -58,9 +58,9 @@ export class SqliteTelemetry implements TelemetrySink {
     this.queue = [];
     try {
       const insert = this.db.prepare(INSERT_ROUTER_LOG);
-      this.db.transaction(() => {
+      inTransaction(this.db, () => {
         for (const row of batch) insert.run(insertParams(row));
-      })();
+      });
     } catch (err) {
       // Keep the rows for the next tick (disk full, database locked, …).
       this.queue = batch.concat(this.queue).slice(-this.maxQueued);

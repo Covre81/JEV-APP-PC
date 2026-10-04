@@ -120,7 +120,7 @@ src/
 │   └── headers.ts                 # hop-by-hop filtering, credential extraction
 └── telemetry/                     # cost audit; can never fail or slow a response
     ├── schema.ts                  # `router_logs` row type, SQL migrations, insert
-    ├── db.ts                      # better-sqlite3 + WAL, applies migrations on boot (user_version)
+    ├── db.ts                      # node:sqlite + WAL, applies migrations on boot (user_version)
     ├── usage-meter.ts             # taps the relayed body (SSE/JSON, gzip/br) for `usage`
     ├── audit.ts                   # one row per exchange, recorded after the socket closes
     ├── recorder.ts                # TelemetrySink port; queued, batched SQLite writes
@@ -175,7 +175,6 @@ Code only parses Anthropic events.
 | `fastify` | Raw-buffer bodies with a hard `bodyLimit`, streamed replies, pino logging |
 | `undici` | One HTTP client for all three upstreams. `request()` exposes the raw, non-decompressed stream that the Anthropic passthrough needs |
 | `zod` | Validates env, the body fields we read, and every JEV/OpenAI payload |
-| `better-sqlite3` | Local SQLite file for the cost audit. One table, plain SQL; migrations are an append-only list applied on boot. **Held at `^12`:** v13 ships no prebuilt binaries and needs a C++ toolchain (MSVC) to install on Windows |
 
 Deliberately absent:
 
@@ -184,6 +183,10 @@ Deliberately absent:
 - The OpenAI SDK: two endpoints and a stream translator don't justify it.
 - An LRU library.
 - An ORM: one table, a handful of queries.
+- A SQLite driver package: the cost audit uses Node's built-in `node:sqlite`
+  (one table, plain SQL, migrations as an append-only list applied on boot),
+  so there is no native module to compile. Node 22 and 24 still flag it
+  experimental and print one `ExperimentalWarning` at startup.
 
 ## Setup
 

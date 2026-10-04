@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
-import Database from 'better-sqlite3';
-import { openTelemetryDb } from '../src/telemetry/db.js';
+import { inTransaction, openTelemetryDb, userVersion } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
 import { MIGRATIONS, type NewRouterLog } from '../src/telemetry/schema.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
@@ -70,9 +70,24 @@ describe('telemetry → stats', () => {
     await sink.close();
   });
 
+  it('rolls back a failed batch so no row is written twice', () => {
+    const db = openTelemetryDb(':memory:');
+    const insert = `INSERT INTO router_logs (final_provider, route_reason, outcome, latency_ms) VALUES ('openai', 'classified', 'ok', 5)`;
+    assert.throws(() =>
+      inTransaction(db, () => {
+        db.exec(insert);
+        throw new Error('disk full');
+      }),
+    );
+    assert.equal(computeStats(db).total, 0);
+    inTransaction(db, () => db.exec(insert));
+    assert.equal(computeStats(db).total, 1);
+    db.close();
+  });
+
   it('upgrades a database migrated by drizzle without re-running its migrations', async () => {
     const path = join(mkdtempSync(join(tmpdir(), 'jev-telemetry-')), 'telemetry.db');
-    const old = new Database(path);
+    const old = new DatabaseSync(path);
     old.exec(MIGRATIONS[0]!);
     old.exec('CREATE TABLE __drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at numeric)');
     old.exec(`INSERT INTO __drizzle_migrations (hash, created_at) VALUES ('f8bc9d56', 1791066394899)`);
@@ -80,8 +95,8 @@ describe('telemetry → stats', () => {
     old.close();
 
     const db = openTelemetryDb(path);
-    assert.equal(db.pragma('user_version', { simple: true }), MIGRATIONS.length);
-    const columns = (db.pragma('table_info(router_logs)') as { name: string }[]).map((c) => c.name);
+    assert.equal(userVersion(db), MIGRATIONS.length);
+    const columns = (db.prepare('PRAGMA table_info(router_logs)').all() as { name: string }[]).map((c) => c.name);
     assert.ok(columns.includes('requested_model') && columns.includes('cache_write_tokens'));
     assert.equal(computeStats(db).total, 1, 'existing rows survive');
     db.close();
