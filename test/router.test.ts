@@ -50,11 +50,48 @@ function ctx(messages: unknown[], overrides: Partial<RequestContext> = {}): Requ
   };
 }
 
+/**
+ * First turn as Claude Code 2.1.289 actually sends it (captured, trimmed): context
+ * reminders, then the typed prompt, then SessionStart hook output as an inline
+ * `system` message closing the array.
+ */
+const realFirstTurn = [
+  {
+    role: 'user',
+    content: [
+      { type: 'text', text: '<system-reminder>\nCodebase and user instructions…\n</system-reminder>' },
+      { type: 'text', text: 'explain this hook' },
+    ],
+  },
+  {
+    role: 'system',
+    content: [
+      { type: 'text', text: 'SessionStart:startup hook success: PONYTAIL MODE ACTIVE' },
+      { type: 'tool_addition', tool: { type: 'tool_reference', name: 'advisor' } },
+    ],
+  },
+];
+const hookOutput = { role: 'system', content: [{ type: 'text', text: 'UserPromptSubmit hook success' }] };
+
 describe('Router (multi-provider)', () => {
   it('routes a simple fresh conversation to the cheap provider', async () => {
     const { router } = setup(() => SIMPLE);
     const d = await router.decide(ctx([user('explain this hook')]));
     assert.deepEqual([d.route, d.reason], ['cheap', 'classified']);
+  });
+
+  it('classifies a real first turn whose hook output trails as a system message', async () => {
+    const { router, classifier } = setup(() => SIMPLE);
+    const d = await router.decide(ctx(realFirstTurn));
+    assert.deepEqual([d.route, d.reason], ['cheap', 'classified']);
+    assert.equal(classifier.calls[0]?.text, 'explain this hook');
+  });
+
+  it('re-classifies a new human turn followed by hook output', async () => {
+    const { router, classifier } = setup(() => SIMPLE);
+    await router.decide(ctx(realFirstTurn));
+    await router.decide(ctx([...realFirstTurn, assistantText, user('now rename it'), hookOutput]));
+    assert.equal(classifier.calls[1]?.text, 'now rename it');
   });
 
   it('routes structural work to the primary', async () => {

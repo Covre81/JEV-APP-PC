@@ -75,6 +75,8 @@ function toolResultText(block: Block): string {
 function translateSystem(system: unknown): ChatMessage[] {
   if (system === undefined) return [];
   const text = asBlocks(system)
+    // Claude Code's notice that a server/deferred tool became available; those tools are not exposed here.
+    .filter((b) => b.type !== 'tool_addition')
     .map((b) => {
       if (b.type !== 'text') throw new NotTranslatableError(`system block: ${b.type}`);
       return textOf(b);

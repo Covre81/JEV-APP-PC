@@ -36,6 +36,11 @@ export function parseMessagesBody(raw: Buffer): MessagesBody | undefined {
 
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
+/** Claude Code inlines hook output as `system` messages; they are not conversation turns. */
+function turns(body: MessagesBody): Message[] {
+  return body.messages.filter((m) => m.role !== 'system');
+}
+
 function hasToolResult(message: Message): boolean {
   return Array.isArray(message.content) && message.content.some((b) => b.type === 'tool_result');
 }
@@ -45,7 +50,7 @@ function hasToolResult(message: Message): boolean {
  * user message is a tool-result continuation of the agent loop (not a new task).
  */
 export function latestHumanText(body: MessagesBody): string | undefined {
-  const last = body.messages.at(-1);
+  const last = turns(body).at(-1);
   if (!last || last.role !== 'user' || hasToolResult(last)) return undefined;
 
   const text =
@@ -61,7 +66,7 @@ export function latestHumanText(body: MessagesBody): string | undefined {
 }
 
 export function isFreshConversation(body: MessagesBody): boolean {
-  return body.messages.length === 1;
+  return turns(body).length === 1;
 }
 
 /** Stable per-conversation key for clients that send no session header. */
