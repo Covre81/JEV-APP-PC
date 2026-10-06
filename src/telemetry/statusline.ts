@@ -5,7 +5,16 @@ export interface StatusLineData {
   readonly healthy: boolean;
   readonly last?: LastRoute;
   readonly today?: { readonly cheap: number; readonly total: number };
+  /** Context of the session's last main-agent request (input + cache), in tokens. */
+  readonly context?: number;
 }
+
+/**
+ * Past this the session is where the money goes: in the 7 days to 2026-10-06,
+ * requests above 200k carried 92% of main-session tokens. Every tool call
+ * re-reads the whole context, so /compact or /clear pays back at once.
+ */
+export const CONTEXT_WARN_TOKENS = 200_000;
 
 export interface LastRoute {
   readonly provider: 'anthropic' | 'openai';
@@ -40,6 +49,15 @@ export function lastRoute(db: TelemetryDb, sessionId: string | undefined): LastR
   return { provider: row.provider, reason: row.reason, outcome: row.outcome, ...(pSimple === undefined ? {} : { pSimple }) };
 }
 
+/** Context size of the session's latest main-agent request that reported usage. */
+export function sessionContext(db: TelemetryDb, sessionId: string | undefined): number | undefined {
+  if (!sessionId) return undefined;
+  const row = db
+    .prepare(`SELECT tokens_in AS tokens FROM router_logs WHERE session_id = @key AND tokens_in IS NOT NULL ORDER BY id DESC LIMIT 1`)
+    .get({ key: `${sessionId}:main` }) as { tokens: number } | undefined;
+  return row?.tokens;
+}
+
 /** Requests since `since` and how many of them the cheap provider answered. */
 export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total: number } {
   return db
@@ -51,13 +69,17 @@ export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total
 }
 
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
-export function renderStatusLine({ healthy, last, today }: StatusLineData): string {
+export function renderStatusLine({ healthy, last, today, context }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
   const parts = ['jev-router ✓'];
   if (last) {
     const where = last.provider === 'openai' ? 'cheap' : 'claude';
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
     parts.push(`last: ${where} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
+  }
+  if (context !== undefined) {
+    const k = `ctx ${Math.round(context / 1000)}k`;
+    parts.push(context >= CONTEXT_WARN_TOKENS ? `⚠ ${k} → /compact or /clear` : k);
   }
   if (today && today.total > 0) parts.push(`today ${today.cheap}/${today.total} cheap`);
   return parts.join(' · ');

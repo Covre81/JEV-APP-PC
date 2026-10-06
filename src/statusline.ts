@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { openTelemetryDb } from './telemetry/db.js';
-import { cheapShare, lastRoute, renderStatusLine, type StatusLineData } from './telemetry/statusline.js';
+import { cheapShare, lastRoute, renderStatusLine, sessionContext, type StatusLineData } from './telemetry/statusline.js';
 
 const HEALTH_TIMEOUT_MS = 500;
 const STDIN_TIMEOUT_MS = 300;
@@ -26,7 +26,8 @@ export async function statusLine({ dbPath, healthUrl, sessionId }: StatusLineOpt
         const midnight = new Date();
         midnight.setHours(0, 0, 0, 0);
         const last = lastRoute(db, sessionId);
-        data = { healthy, ...(last ? { last } : {}), today: cheapShare(db, midnight) };
+        const context = sessionContext(db, sessionId);
+        data = { healthy, ...(last ? { last } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
       } finally {
         db.close();
       }
