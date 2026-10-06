@@ -36,19 +36,13 @@ export function inTransaction(db: TelemetryDb, fn: () => void): void {
   }
 }
 
-export function userVersion(db: TelemetryDb): number {
+function userVersion(db: TelemetryDb): number {
   return (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
 }
 
 function migrate(db: TelemetryDb): void {
-  let applied = userVersion(db);
+  const applied = userVersion(db);
   if (applied >= MIGRATIONS.length) return;
-  // ponytail: drizzle bridge. Databases created under drizzle count their migrations in
-  // __drizzle_migrations instead. Delete once every telemetry.db has been opened by this
-  // version (it sets user_version, so the bridge never runs twice on the same file).
-  if (applied === 0 && db.prepare(`SELECT 1 FROM sqlite_master WHERE name = '__drizzle_migrations'`).get()) {
-    applied = (db.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get() as { n: number }).n;
-  }
   inTransaction(db, () => {
     for (const sql of MIGRATIONS.slice(applied)) db.exec(sql);
     db.exec(`PRAGMA user_version = ${MIGRATIONS.length}`);
