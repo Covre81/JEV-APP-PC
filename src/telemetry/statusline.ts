@@ -1,4 +1,5 @@
 import type { TelemetryDb } from './db.js';
+import type { FinalProvider, Outcome } from './schema.js';
 
 /** What the Claude Code status line needs: is the router up, and where did this session's last turn go. */
 export interface StatusLineData {
@@ -17,17 +18,17 @@ export interface StatusLineData {
 export const CONTEXT_WARN_TOKENS = 200_000;
 
 export interface LastRoute {
-  readonly provider: 'anthropic' | 'openai';
+  readonly provider: FinalProvider;
   readonly reason: string;
-  readonly outcome: string;
+  readonly outcome: Outcome;
   /** P(simple) from JEV; undefined when JEV was not asked (sticky turn, auxiliary request). */
   readonly pSimple?: number;
 }
 
 interface LastRow {
-  provider: 'anthropic' | 'openai';
+  provider: FinalProvider;
   reason: string;
-  outcome: string;
+  outcome: Outcome;
   jev: string | null;
 }
 
