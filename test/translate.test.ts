@@ -88,6 +88,26 @@ describe('toChatCompletion', () => {
     ]);
   });
 
+  it('exposes deferred tools once a tool search loaded them', () => {
+    const body = MessagesBody.parse({
+      ...claudeCodeTurn,
+      messages: [
+        { role: 'user', content: 'use big' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'ts', name: 'ToolSearch', input: { query: 'big' } }] },
+        {
+          role: 'user',
+          content: [{ type: 'tool_result', tool_use_id: 'ts', content: [{ type: 'tool_reference', tool_name: 'mcp__big__tool' }] }],
+        },
+      ],
+    });
+    const chat = toChatCompletion(body, opts);
+    assert.deepEqual(chat.messages.at(-1), { role: 'tool', tool_call_id: 'ts', content: 'Tool loaded: mcp__big__tool' });
+    assert.deepEqual(
+      chat.tools?.map((t) => t.function.name),
+      ['Read', 'mcp__big__tool'],
+    );
+  });
+
   it('refuses content it cannot map faithfully', () => {
     const withImage = MessagesBody.parse({
       model: 'm',
