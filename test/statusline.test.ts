@@ -22,6 +22,8 @@ const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
   latencyMs: 100,
   ...over,
 });
+/** What audit.ts writes for a main-agent request that carries typed human text. */
+const turn = { requestClass: 'main', humanPromptHash: 'h' } as const;
 const jev = (pSimple: number) => ({ simple: pSimple, standard: 0, structural: 1 - pSimple, pSimple, pComplex: 0, classifierMs: 50 });
 
 describe('statusline', () => {
@@ -36,26 +38,31 @@ describe('statusline', () => {
 
     dbPath = join(mkdtempSync(join(tmpdir(), 'jev-statusline-')), 'telemetry.db');
     const sink = new SqliteTelemetry(openTelemetryDb(dbPath), { flushIntervalMs: 60_000 });
-    sink.record(row({ finalProvider: 'openai', jevDecision: jev(0.93) }));
-    sink.record(row({ sessionId: 'sess-1:agent-2', routeReason: 'sticky' }));
-    sink.record(row({ sessionId: 'sess-10:main', finalProvider: 'openai', jevDecision: jev(0.97) }));
-    sink.record(row({ sessionId: 'old:main', createdAt: new Date('2020-01-01T00:00:00Z') }));
-    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', tokensIn: 180_000 }));
-    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', tokensIn: 412_300 }));
-    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', outcome: 'stream_error' })); // no usage: must not hide the warning
+    // Today's share counts main-agent human turns plus any JEV decision: 7 below, 3 answered by the cheap model.
+    sink.record(row({ ...turn, finalProvider: 'openai', jevDecision: jev(0.93) }));
+    sink.record(row({ sessionId: 'sess-1:agent-2', routeReason: 'sticky', requestClass: 'subagent', humanPromptHash: 'h' }));
+    sink.record(row({ ...turn, sessionId: 'sess-10:main', finalProvider: 'openai', jevDecision: jev(0.97) }));
+    sink.record(row({ ...turn, sessionId: 'old:main', createdAt: new Date('2020-01-01T00:00:00Z') }));
+    sink.record(row({ ...turn, sessionId: 'big:main', routeReason: 'sticky', tokensIn: 180_000 }));
+    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', requestClass: 'main', tokensIn: 412_300 })); // tool-result continuation
+    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', requestClass: 'main', outcome: 'stream_error' })); // no usage: must not hide the warning
     sink.record(row({ sessionId: 'big:agent-1', routeReason: 'sticky', tokensIn: 30_000 }));
-    sink.record(row({ sessionId: 'small:main', routeReason: 'sticky', tokensIn: 64_400 }));
+    sink.record(row({ ...turn, sessionId: 'small:main', routeReason: 'sticky', tokensIn: 64_400 }));
+    sink.record(row({ sessionId: 'sub:agent-1', requestClass: 'subagent', humanPromptHash: 'h', finalProvider: 'openai', jevDecision: jev(0.92) }));
+    sink.record(row({ sessionId: 'nohdr:main', humanPromptHash: 'h', jevDecision: jev(0.4) })); // no hint headers: request class is null
+    sink.record(row({ sessionId: 'aux:main', routeReason: 'passthrough:request-class', requestClass: 'auxiliary', humanPromptHash: 'h' }));
+    sink.record(row({ ...turn, sessionId: 'fail:main', finalProvider: 'openai', outcome: 'stream_error', jevDecision: jev(0.95) }));
     await sink.close();
   });
   after(() => new Promise<void>((r) => health.close(() => r())));
 
-  it("shows the session's last route, across its agents, and today's cheap share", async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 2/8 cheap');
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-10' }), 'jev-router ✓ · last: cheap (JEV 0.97) · today 2/8 cheap');
+  it("shows the session's last route, across its agents, and today's cheap share of routed turns", async () => {
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-10' }), 'jev-router ✓ · last: cheap (JEV 0.97) · today 3/7 cheap');
   });
 
   it('says only that the router is up when the session has no turns yet', async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'new' }), 'jev-router ✓ · today 2/8 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'new' }), 'jev-router ✓ · today 3/7 cheap');
     assert.equal(await statusLine({ dbPath: join(tmpdir(), 'missing-jev.db'), healthUrl }), 'jev-router ✓');
   });
 
@@ -66,10 +73,10 @@ describe('statusline', () => {
   });
 
   it("shows the main agent's latest context and warns past 200k", async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'small' }), 'jev-router ✓ · last: claude (sticky) · ctx 64k · today 2/8 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'small' }), 'jev-router ✓ · last: claude (sticky) · ctx 64k · today 3/7 cheap');
     assert.equal(
       await statusLine({ dbPath, healthUrl, sessionId: 'big' }),
-      'jev-router ✓ · last: claude (sticky) · ⚠ ctx 412k → /compact or /clear · today 2/8 cheap',
+      'jev-router ✓ · last: claude (sticky) · ⚠ ctx 412k → /compact or /clear · today 3/7 cheap',
     );
   });
 

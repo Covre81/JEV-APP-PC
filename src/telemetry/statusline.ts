@@ -1,9 +1,11 @@
 import type { TelemetryDb } from './db.js';
+import type { FinalProvider, Outcome } from './schema.js';
 
 /** What the Claude Code status line needs: is the router up, and where did this session's last turn go. */
 export interface StatusLineData {
   readonly healthy: boolean;
   readonly last?: LastRoute;
+  /** Today's routed turns (see cheapShare), and how many the cheap model answered. */
   readonly today?: { readonly cheap: number; readonly total: number };
   /** Context of the session's last main-agent request (input + cache), in tokens. */
   readonly context?: number;
@@ -17,17 +19,17 @@ export interface StatusLineData {
 export const CONTEXT_WARN_TOKENS = 200_000;
 
 export interface LastRoute {
-  readonly provider: 'anthropic' | 'openai';
+  readonly provider: FinalProvider;
   readonly reason: string;
-  readonly outcome: string;
+  readonly outcome: Outcome;
   /** P(simple) from JEV; undefined when JEV was not asked (sticky turn, auxiliary request). */
   readonly pSimple?: number;
 }
 
 interface LastRow {
-  provider: 'anthropic' | 'openai';
+  provider: FinalProvider;
   reason: string;
-  outcome: string;
+  outcome: Outcome;
   jev: string | null;
 }
 
@@ -58,12 +60,24 @@ export function sessionContext(db: TelemetryDb, sessionId: string | undefined): 
   return row?.tokens;
 }
 
-/** Requests since `since` and how many of them the cheap provider answered. */
+/**
+ * Routed turns since `since` and how many of them the cheap provider answered.
+ * Counting requests buried the routing in traffic it never decides: auxiliary
+ * requests always go primary, and every tool call of a primary session is one
+ * more request.
+ *
+ * A routed turn is a main-agent request carrying typed text (audit.ts hashes
+ * any trailing user text, auxiliary requests included, so the request class is
+ * what singles out the human), or any request JEV scored, which adds subagent
+ * conversations. Without CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 there is no request
+ * class and only JEV decisions count.
+ */
 export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total: number } {
   return db
     .prepare(
       `SELECT count(*) AS total, coalesce(sum(CASE WHEN final_provider = 'openai' AND outcome = 'ok' THEN 1 ELSE 0 END), 0) AS cheap
-       FROM router_logs WHERE created_at >= @since`,
+       FROM router_logs
+       WHERE created_at >= @since AND ((request_class = 'main' AND human_prompt_hash IS NOT NULL) OR jev_decision IS NOT NULL)`,
     )
     .get({ since: since.getTime() }) as { cheap: number; total: number };
 }
