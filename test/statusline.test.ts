@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -42,6 +42,7 @@ describe('statusline', () => {
     sink.record(row({ sessionId: 'old:main', createdAt: new Date('2020-01-01T00:00:00Z') }));
     sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', tokensIn: 180_000 }));
     sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', tokensIn: 412_300 }));
+    sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', outcome: 'stream_error' })); // no usage: must not hide the warning
     sink.record(row({ sessionId: 'big:agent-1', routeReason: 'sticky', tokensIn: 30_000 }));
     sink.record(row({ sessionId: 'small:main', routeReason: 'sticky', tokensIn: 64_400 }));
     await sink.close();
@@ -49,20 +50,26 @@ describe('statusline', () => {
   after(() => new Promise<void>((r) => health.close(() => r())));
 
   it("shows the session's last route, across its agents, and today's cheap share", async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 2/7 cheap');
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-10' }), 'jev-router ✓ · last: cheap (JEV 0.97) · today 2/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 2/8 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-10' }), 'jev-router ✓ · last: cheap (JEV 0.97) · today 2/8 cheap');
   });
 
   it('says only that the router is up when the session has no turns yet', async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'new' }), 'jev-router ✓ · today 2/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'new' }), 'jev-router ✓ · today 2/8 cheap');
     assert.equal(await statusLine({ dbPath: join(tmpdir(), 'missing-jev.db'), healthUrl }), 'jev-router ✓');
   });
 
+  it('drops the details instead of failing when the database is unreadable', async () => {
+    const garbage = join(mkdtempSync(join(tmpdir(), 'jev-statusline-')), 'telemetry.db');
+    writeFileSync(garbage, 'not a sqlite database, just bytes '.repeat(200));
+    assert.equal(await statusLine({ dbPath: garbage, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓');
+  });
+
   it("shows the main agent's latest context and warns past 200k", async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'small' }), 'jev-router ✓ · last: claude (sticky) · ctx 64k · today 2/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'small' }), 'jev-router ✓ · last: claude (sticky) · ctx 64k · today 2/8 cheap');
     assert.equal(
       await statusLine({ dbPath, healthUrl, sessionId: 'big' }),
-      'jev-router ✓ · last: claude (sticky) · ⚠ ctx 412k → /compact or /clear · today 2/7 cheap',
+      'jev-router ✓ · last: claude (sticky) · ⚠ ctx 412k → /compact or /clear · today 2/8 cheap',
     );
   });
 
@@ -70,11 +77,29 @@ describe('statusline', () => {
     assert.equal(await statusLine({ dbPath, healthUrl: 'http://127.0.0.1:1/healthz', sessionId: 'sess-1' }), 'jev-router ✗ offline');
   });
 
+  // The timeout turns a missing health timeout into a failure instead of a hung suite.
+  it('reports the router offline when /healthz accepts but never answers', { timeout: 2_000 }, async () => {
+    const hung = createServer(() => {});
+    await new Promise<void>((r) => hung.listen(0, '127.0.0.1', r));
+    try {
+      const url = `http://127.0.0.1:${(hung.address() as AddressInfo).port}/healthz`;
+      assert.equal(await statusLine({ dbPath, healthUrl: url, sessionId: 'sess-1' }), 'jev-router ✗ offline');
+    } finally {
+      hung.closeAllConnections();
+      await new Promise<void>((r) => hung.close(() => r()));
+    }
+  });
+
   it('flags a last turn that did not end ok', () => {
     assert.equal(
       renderStatusLine({ healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error', pSimple: 0.9 } }),
       'jev-router ✓ · last: cheap (JEV 0.90) stream_error',
     );
+  });
+
+  it('warns from exactly 200k context on', () => {
+    assert.equal(renderStatusLine({ healthy: true, context: 199_999 }), 'jev-router ✓ · ctx 200k');
+    assert.equal(renderStatusLine({ healthy: true, context: 200_000 }), 'jev-router ✓ · ⚠ ctx 200k → /compact or /clear');
   });
 
   it('reads the session id from the JSON Claude Code pipes in, and gives up on silence', async () => {
