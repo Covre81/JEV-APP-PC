@@ -297,14 +297,17 @@ up and where the session's last turn went, add to the same `settings.json`:
 It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
 `jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms. The
 reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
-asked (`sticky`, `auxiliary`, …). `ctx 125k` is the context the session's main
-agent sent on its last request (input + cache); from 200k on it turns into
-`⚠ ctx 412k → /compact or /clear`, because every tool call re-reads it all —
-in the week to 2026-10-06, requests above 200k carried 92% of main-session
-tokens. Pass `--env` explicitly: the status line runs
-in each project's directory, and that project's own `.env` could set another
-`PORT`. Adjust the paths to your checkout (or use `jev-router statusline` after
-`npm link`).
+asked (`sticky`, `auxiliary`, …). `today 12/40 cheap` counts today's routed
+turns, not requests: main-agent human turns plus every turn JEV scored
+(subagents included). Auxiliary requests and tool-call continuations are not
+routing decisions. Without the hint headers only JEV-scored turns count.
+`ctx 125k` is the context the session's main agent sent on its last request
+(input + cache); from 200k on it turns into `⚠ ctx 412k → /compact or /clear`,
+because every tool call re-reads it all — in the week to 2026-10-06, requests
+above 200k carried 92% of main-session tokens. Pass `--env` explicitly: the
+status line runs in each project's directory, and that project's own `.env`
+could set another `PORT`. Adjust the paths to your checkout (or use
+`jev-router statusline` after `npm link`).
 
 ## Telemetry and cost audit
 
