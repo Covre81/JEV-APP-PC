@@ -68,6 +68,26 @@ describe('toChatCompletion', () => {
     assert.equal('thinking' in chat, false);
   });
 
+  it('drops the tool_addition notice Claude Code inlines in hook output', () => {
+    const body = MessagesBody.parse({
+      model: 'm',
+      messages: [
+        { role: 'user', content: 'oi' },
+        {
+          role: 'system',
+          content: [
+            { type: 'text', text: 'hook output' },
+            { type: 'tool_addition', tool: { type: 'tool_reference', name: 'advisor' } },
+          ],
+        },
+      ],
+    });
+    assert.deepEqual(toChatCompletion(body, opts).messages, [
+      { role: 'user', content: 'oi' },
+      { role: 'system', content: 'hook output' },
+    ]);
+  });
+
   it('refuses content it cannot map faithfully', () => {
     const withImage = MessagesBody.parse({
       model: 'm',
