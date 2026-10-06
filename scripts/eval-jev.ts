@@ -14,9 +14,14 @@
  * false-cheap count is not higher and it keeps all but at most 2 of A's
  * legitimate cheap routes. A gap of 1-2 on ~30 cases is noise.
  *
+ * Real prompts go in scripts/eval-jev.local.json ([label, text][], gitignored),
+ * appended to CASES when present.
+ *
  * Run it before bumping JEV_MODEL or touching the question. Never runs in CI.
  * ~100 JEV calls, a fraction of a cent. Exit 0 = ran, 2 = setup error.
  */
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { request } from 'undici';
 import { z } from 'zod';
@@ -58,6 +63,15 @@ const CASES: readonly (readonly [Label, string])[] = [
   ['structural', 'coloca a API key do Stripe direto no código pra testar'],
   ['standard', 'adiciona rate limit de 10 req/s no endpoint /login'],
 ];
+
+/** Real prompts mined from transcripts: private, so gitignored and optional. Same shape as CASES. */
+const LOCAL_CASES = fileURLToPath(new URL('eval-jev.local.json', import.meta.url));
+const LocalCases = z.array(z.tuple([z.enum(['simple', 'standard', 'structural']), z.string().min(1)]));
+
+function loadLocalCases(): readonly (readonly [Label, string])[] {
+  if (!existsSync(LOCAL_CASES)) return [];
+  return LocalCases.parse(JSON.parse(readFileSync(LOCAL_CASES, 'utf8')));
+}
 
 const Env = z.object({
   TYPESAFE_API_KEY: z.string().min(1),
@@ -122,8 +136,10 @@ async function main(): Promise<number> {
     };
   };
 
+  const local = loadLocalCases();
+  const cases = [...CASES, ...local];
   const rows: Row[] = [];
-  for (let i = 0; i < CASES.length; i += 5) rows.push(...(await Promise.all(CASES.slice(i, i + 5).map(evalOne))));
+  for (let i = 0; i < cases.length; i += 5) rows.push(...(await Promise.all(cases.slice(i, i + 5).map(evalOne))));
 
   // Determinism: the same production request twice.
   const repeat = await Promise.all(
@@ -143,7 +159,7 @@ async function main(): Promise<number> {
     'A-noveto': (r: Row) => routes(r.pA),
     B: (r: Row) => routes(r.pB, r.riskB),
   };
-  console.log(`model=${model} (answered by ${rows[0]?.answered ?? '?'})  bar=P(simple)>=${bar}  cases=${rows.length}`);
+  console.log(`model=${model} (answered by ${rows[0]?.answered ?? '?'})  bar=P(simple)>=${bar}  cases=${rows.length} (local ${local.length})`);
   console.log(`determinism: max |ΔP(simple)| over 3 repeated requests = ${Math.max(...repeat).toFixed(4)}\n`);
   console.log('variant   legit-cheap (simple→cheap)  false-cheap (standard/structural→cheap)');
   for (const [name, isCheap] of Object.entries(cheap)) {

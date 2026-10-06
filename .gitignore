@@ -5,3 +5,4 @@ dist/
 graphify-out/
 .cursor/
 .ai-memory.toml
+scripts/eval-jev.local.json
