@@ -4,7 +4,7 @@ import type { MessagesBody } from '../../routing/messages-body.js';
  * Shallow Anthropic Messages → OpenAI Chat Completions translation.
  *
  * "Shallow" is a contract, not a shortcut: anything without a faithful 1:1
- * mapping (images, documents, server tools, tool search references) throws
+ * mapping (images, documents, server tools) throws
  * NotTranslatableError, and the request goes to the primary provider instead
  * of reaching the cheap model with half its context silently missing.
  */
@@ -65,6 +65,9 @@ function toolResultText(block: Block): string {
       ? ''
       : asBlocks(content)
           .map((b) => {
+            // Client-side tool search (Claude Code's ToolSearch) answers with references;
+            // the referenced definitions are exposed by translateTools.
+            if (b.type === 'tool_reference') return `Tool loaded: ${String(b['tool_name'])}`;
             if (b.type !== 'text') throw new NotTranslatableError(`tool_result content: ${b.type}`);
             return textOf(b);
           })
@@ -128,12 +131,25 @@ function translateAssistant(content: unknown): ChatMessage {
   return toolCalls.length > 0 ? { role: 'assistant', content: text, tool_calls: toolCalls } : { role: 'assistant', content: text };
 }
 
-function translateTools(tools: unknown): ChatTool[] | undefined {
+/** Names of deferred tools a tool search already loaded somewhere in the history. */
+function loadedTools(messages: MessagesBody['messages']): Set<string> {
+  const names = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== 'user' || typeof message.content === 'string') continue;
+    for (const block of message.content as Block[]) {
+      if (block.type !== 'tool_result' || !Array.isArray(block['content'])) continue;
+      for (const b of block['content'] as Block[]) if (b.type === 'tool_reference') names.add(String(b['tool_name']));
+    }
+  }
+  return names;
+}
+
+function translateTools(tools: unknown, loaded: Set<string>): ChatTool[] | undefined {
   if (!Array.isArray(tools)) return undefined;
   const fns = (tools as Block[])
     // Server tools (web search, tool search…) have no client-side schema, and
-    // deferred tools are not meant to be in context until searched for.
-    .filter((t) => t['input_schema'] !== undefined && t['defer_loading'] !== true)
+    // deferred tools are not in context until a tool search loads them.
+    .filter((t) => t['input_schema'] !== undefined && (t['defer_loading'] !== true || loaded.has(String(t['name']))))
     .map(
       (t): ChatTool => ({
         type: 'function',
@@ -173,7 +189,7 @@ export function toChatCompletion(body: MessagesBody, options: TranslateOptions):
     else throw new NotTranslatableError(`message role: ${message.role}`);
   }
 
-  const tools = translateTools(body['tools']);
+  const tools = translateTools(body['tools'], loadedTools(body.messages));
   const toolChoice = tools ? translateToolChoice(body['tool_choice']) : undefined;
   const stream = body['stream'] === true;
   const stop = body['stop_sequences'];
