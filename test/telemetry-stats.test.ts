@@ -85,6 +85,24 @@ describe('telemetry → stats', () => {
     await sink.close();
   });
 
+  it('splits the cheap route by model (trivial 20B vs standard Gemma)', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', model: 'gpt-oss:20b-cloud' }));
+    sink.record(row({ finalProvider: 'openai', model: 'gemma4:31b-cloud' }));
+    sink.record(row({ finalProvider: 'openai', model: 'gemma4:31b-cloud', outcome: 'stream_error' }));
+    sink.record(row({ finalProvider: 'anthropic', model: 'claude-opus-5-5' }));
+    sink.flush();
+
+    const stats = computeStats(db);
+    assert.deepEqual(stats.cheapByModel, [
+      { model: 'gemma4:31b-cloud', requests: 2, ok: 1 },
+      { model: 'gpt-oss:20b-cloud', requests: 1, ok: 1 },
+    ]);
+    assert.match(renderStats(stats), /gemma4:31b-cloud\s+2\s+1/);
+    await sink.close();
+  });
+
   it('migrates a database written by the previous build without losing rows', () => {
     const dir = mkdtempSync(join(tmpdir(), 'jev-migrate-'));
     const file = join(dir, 'telemetry.db');

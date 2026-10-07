@@ -4,7 +4,7 @@ import type { ComplexityClassifier } from './classifier/classifier.js';
 import { HeuristicClassifier } from './classifier/heuristic-classifier.js';
 import { JevClassifier } from './classifier/jev-classifier.js';
 import { removedEnvSet, type Config } from './config.js';
-import type { Route } from './domain/policy.js';
+import type { Tier } from './domain/policy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { CheapHealth } from './providers/cheap-health.js';
 import { OpenAICompatibleProvider } from './providers/openai/provider.js';
@@ -19,6 +19,9 @@ import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/
 // conversation is treated as unknown and goes primary: savings lost, never
 // correctness. Raise it only if `stats` shows that under heavy parallel use.
 const SESSION_MAX_ENTRIES = 10_000;
+
+/** Input tokens a cheap model can take: 90% of its window minus the reserved output. */
+const inputBudget = (contextTokens: number, maxOutputTokens: number) => Math.floor(contextTokens * 0.9) - maxOutputTokens;
 
 /**
  * Composition root: the only place that knows concrete implementations.
@@ -37,12 +40,20 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
 
   const router = new Router(
     classifier,
-    new TtlLruStore<Route>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
+    new TtlLruStore<Tier>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
     {
-      policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
+      policy: {
+        minCheapProbability: config.router.minCheapProbability,
+        standardRoute: config.router.standardRoute,
+        standardEnabled: config.cheapStandard !== undefined,
+        minStandardProbability: config.router.minStandardProbability,
+      },
       primaryClasses: config.router.primaryClasses,
       // Input budget: 90% of the window, minus the output tokens we reserve.
-      cheapContextTokens: Math.floor(config.cheap.contextTokens * 0.9) - config.cheap.maxOutputTokens,
+      cheapContextTokens: inputBudget(config.cheap.contextTokens, config.cheap.maxOutputTokens),
+      ...(config.cheapStandard
+        ? { standardContextTokens: inputBudget(config.cheapStandard.contextTokens, config.cheap.maxOutputTokens) }
+        : {}),
       classifierTimeoutMs: config.classifier.timeoutMs,
       classifierMaxChars: config.classifier.maxChars,
     },
@@ -51,6 +62,10 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
   const providers = {
     primary: new AnthropicProvider(config.primary),
     cheap: new OpenAICompatibleProvider(config.cheap),
+    // Same endpoint and key, bigger model: the health check covers both tiers.
+    ...(config.cheapStandard
+      ? { standard: new OpenAICompatibleProvider({ ...config.cheap, model: config.cheapStandard.model }) }
+      : {}),
   };
 
   // Errors surface through the server's logger, which exists only after buildServer.
@@ -93,6 +108,7 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
       ...(worker ? { worker: true } : {}),
       primary: config.primary.baseUrl,
       cheap: `${config.cheap.baseUrl} (${config.cheap.model})`,
+      standard: config.cheapStandard?.model ?? 'off',
       telemetry: config.telemetry.dbPath ?? 'disabled',
     },
     'jev-router ready',

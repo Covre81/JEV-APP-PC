@@ -37,10 +37,14 @@ const Env = z
     CHEAP_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8_192),
     CHEAP_CONTEXT_TOKENS: z.coerce.number().int().positive().default(131_072),
     CHEAP_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+    // Standard tier: level-2 work on a bigger cheap model, same CHEAP_BASE_URL. `off` disables it.
+    CHEAP_MODEL_STANDARD: z.string().min(1).default('gemma4:31b-cloud'),
+    CHEAP_STANDARD_CONTEXT_TOKENS: z.coerce.number().int().positive().optional(),
     CHEAP_HEALTH_ENABLED: bool.default(true),
     CHEAP_HEALTH_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
 
-    ROUTER_MIN_CHEAP_PROBABILITY: z.coerce.number().min(0).max(1).default(0.8),
+    ROUTER_MIN_CHEAP_PROBABILITY: z.coerce.number().min(0).max(1).default(0.9),
+    ROUTER_MIN_STANDARD_PROBABILITY: z.coerce.number().min(0).max(1).default(0.75),
     ROUTER_STANDARD_ROUTE: z.enum(['primary', 'cheap']).default('primary'),
     ROUTER_PRIMARY_CLASSES: csv.default(new Set(['auxiliary', 'compaction'])),
     FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(false),
@@ -115,6 +119,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       contextTokens: e.CHEAP_CONTEXT_TOKENS,
       timeoutMs: e.CHEAP_TIMEOUT_MS,
     },
+    // undefined = standard tier off: level-2 work stays on the primary (the old behavior).
+    cheapStandard:
+      e.CHEAP_MODEL_STANDARD === 'off'
+        ? undefined
+        : { model: e.CHEAP_MODEL_STANDARD, contextTokens: e.CHEAP_STANDARD_CONTEXT_TOKENS ?? e.CHEAP_CONTEXT_TOKENS },
     proxyAuthToken: e.PROXY_AUTH_TOKEN,
     bodyLimitBytes: e.BODY_LIMIT_BYTES,
     classifier:
@@ -130,6 +139,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         : { kind: 'heuristic' as const, timeoutMs: e.JEV_TIMEOUT_MS, maxChars: e.CLASSIFIER_MAX_CHARS },
     router: {
       minCheapProbability: e.ROUTER_MIN_CHEAP_PROBABILITY,
+      minStandardProbability: e.ROUTER_MIN_STANDARD_PROBABILITY,
       standardRoute: e.ROUTER_STANDARD_ROUTE,
       primaryClasses: e.ROUTER_PRIMARY_CLASSES,
       failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,

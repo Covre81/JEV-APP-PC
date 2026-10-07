@@ -16,7 +16,8 @@ import { forwardableHeaders, presentedCredential, single } from './headers.js';
 export interface ServerDeps {
   readonly config: Config;
   readonly router: Router;
-  readonly providers: Readonly<Record<Route, Provider>>;
+  /** `standard` serves the standard tier; without it that tier falls back to `cheap`. */
+  readonly providers: Readonly<Record<Route, Provider>> & { readonly standard?: Provider };
   readonly telemetry?: TelemetrySink;
   /** Live cheap-provider health; absent = never checked ('unknown'). */
   readonly cheapHealth?: { readonly state: CheapState };
@@ -96,12 +97,15 @@ export function buildServer({
       contextCompacted: single(req.headers, 'x-claude-code-context-compacted') !== undefined,
     });
 
+    const standard = decision.tier === 'standard' && providers.standard !== undefined;
+    const cheapProvider = standard ? providers.standard! : providers.cheap;
+    const cheapModel = standard ? (config.cheapStandard?.model ?? config.cheap.model) : config.cheap.model;
     const exchange = (route: Route): ExchangeContext => ({
       startedAt,
       startedAtMs,
       humanText: latestHumanText(base.body!),
       requestClass: single(req.headers, 'x-claude-code-request-class'),
-      model: route === 'cheap' ? config.cheap.model : base.body!.model,
+      model: route === 'primary' ? base.body!.model : cheapModel,
       requestedModel: base.body!.model,
       toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
     });
@@ -114,7 +118,7 @@ export function buildServer({
     }
 
     if (decision.route === 'cheap') {
-      const cheap =await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      const cheap = await cheapProvider.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
       if (cheap.kind === 'response') return relay(reply, cheap, decision, req, exchange('cheap'));
 
       router.pinToPrimary(decision);

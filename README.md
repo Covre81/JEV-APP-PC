@@ -29,8 +29,9 @@ only on work that needs Claude**.
 
 | Route | Provider | Billing | Gets |
 |---|---|---|---|
-| `cheap` | Any OpenAI-compatible API (default: Ollama Cloud `gpt-oss:20b-cloud`) | Free plan with usage limits, or per token on Groq/OpenRouter | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
-| `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Also level 2 by default, plus everything the cheap route can't carry |
+| `cheap`, trivial tier | Any OpenAI-compatible API (default: Ollama Cloud `gpt-oss:20b-cloud`, `CHEAP_MODEL`) | Free plan with usage limits, or per token on Groq/OpenRouter | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
+| `cheap`, standard tier | Same endpoint, bigger model (default `gemma4:31b-cloud`, `CHEAP_MODEL_STANDARD`; `off` disables it) | Same | Level 2, standard feature work, when it carries no risk |
+| `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Plus everything the cheap route can't carry |
 
 **Rules.**
 
@@ -38,15 +39,22 @@ only on work that needs Claude**.
    question, and the router gets the probability distribution
    `{simple, standard, structural}`.
 2. **The cheap route needs confidence, not just a majority.** A task goes
-   cheap only when `P(simple) ≥ ROUTER_MIN_CHEAP_PROBABILITY` (default 0.8).
-   It does not use the most likely level: `{.45, .30, .25}` has "simple" as
-   its top level, but a 55% chance the cheap model is out of its depth.
-   Level 2 stays primary unless `ROUTER_STANDARD_ROUTE=cheap`.
-3. **The route sticks for the whole conversation.**
-   - Tool-result turns of the agent loop reuse the route without calling JEV.
-   - A new human turn on the cheap route is re-classified and may escalate.
+   to the trivial tier only when `P(simple) ≥ ROUTER_MIN_CHEAP_PROBABILITY`
+   (default 0.9). It does not use the most likely level: `{.45, .30, .25}`
+   has "simple" as its top level, but a 55% chance the small model is out of
+   its depth. That turn goes to the standard tier instead when
+   `P(simple) + P(standard) ≥ ROUTER_MIN_STANDARD_PROBABILITY` (default
+   0.75), and to Anthropic otherwise. With `CHEAP_MODEL_STANDARD=off`, level
+   2 stays primary unless the legacy `ROUTER_STANDARD_ROUTE=cheap`.
+3. **The tier sticks for the whole conversation, and only moves up**
+   (trivial → standard → primary).
+   - Tool-result turns of the agent loop reuse the tier without calling JEV.
+   - A new human turn on a cheap tier is re-classified and may escalate
+     (`escalated:standard`, `escalated`).
    - Primary is terminal: going back down would throw away the Anthropic
      cache, and the next escalation would pay to rebuild it.
+   - Each tier has its own context budget (`CHEAP_CONTEXT_TOKENS`,
+     `CHEAP_STANDARD_CONTEXT_TOKENS`); past it, the turn goes primary.
 4. **Failure only ever moves work up to Anthropic.**
    - The request can't be translated (images, documents, server tools): primary.
    - The request is larger than the cheap model's context budget: primary.
@@ -511,3 +519,5 @@ Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MOD
 | Date | Model | Trials | Success | Provider failures | Avg trial | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-04 | `gpt-oss:20b-cloud` | 15 (pad 32 KB, 12 steps) | 93% | 7% (1 `stream_error`) | 6.7 s | 25 schema errors, mostly `Read` with `offset: 0`, which Claude Code accepts (the bench now does too, so they were bench artifacts). A separate 45-trial capture: 0 `stream_error`, 1 `rename` `wrong_result` (import not updated). |
+| 2026-10-07 | `gemma4:31b-cloud` (standard tier, gemma profile) | 6 (`rename` 3 + `fix-bug` 3, pad 16 KB, 12 steps) | 100% | 0% | 3.4 s | 0 tool errors. |
+| 2026-10-07 | `gpt-oss:20b-cloud` (same run, for comparison) | 3 (`rename`, pad 16 KB) | 33% | 0% | 14.3 s | 1 `wrong_result` (import not updated), 1 `max_steps`, 3 schema errors (relative `file_path`, bad Grep `output_mode`). |

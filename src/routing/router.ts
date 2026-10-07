@@ -1,6 +1,6 @@
 import type { Classification, ComplexityClassifier } from '../classifier/classifier.js';
 import type { ComplexityDistribution } from '../domain/complexity.js';
-import { selectRoute, stickyRoute, type PolicyOptions, type Route } from '../domain/policy.js';
+import { selectTier, stickyTier, tierRoute, type PolicyOptions, type Route, type Tier } from '../domain/policy.js';
 import {
   conversationFingerprint,
   estimateInputTokens,
@@ -17,6 +17,7 @@ export type RouteReason =
   | 'sticky'
   | 'classified'
   | 'escalated'
+  | 'escalated:standard'
   | 'escalated:context'
   | 'failover:cheap-unavailable'
   | 'skipped:cheap-unhealthy'
@@ -24,6 +25,8 @@ export type RouteReason =
 
 export interface RouteDecision {
   readonly route: Route;
+  /** Which cheap model serves a cheap route; absent on decisions built outside the router. */
+  readonly tier?: Tier;
   readonly reason: RouteReason;
   readonly conversationKey: string | undefined;
   readonly distribution?: Classification;
@@ -45,8 +48,10 @@ export interface RouterOptions {
   readonly policy: PolicyOptions;
   /** x-claude-code-request-class values that always use the primary provider. */
   readonly primaryClasses: ReadonlySet<string>;
-  /** Input-token budget of the cheap model (its context window minus headroom). */
+  /** Input-token budget of the trivial-tier model (its context window minus headroom). */
   readonly cheapContextTokens: number;
+  /** Input-token budget of the standard-tier model; defaults to the trivial one. */
+  readonly standardContextTokens?: number;
   readonly classifierTimeoutMs: number;
   readonly classifierMaxChars: number;
 }
@@ -67,7 +72,7 @@ export interface RouterOptions {
 export class Router {
   constructor(
     private readonly classifier: ComplexityClassifier,
-    private readonly sessions: TtlLruStore<Route>,
+    private readonly sessions: TtlLruStore<Tier>,
     private readonly options: RouterOptions,
   ) {}
 
@@ -81,24 +86,35 @@ export class Router {
       : `fp:${conversationFingerprint(ctx.body)}`;
     const fresh = isFreshConversation(ctx.body) || ctx.contextCompacted;
     const inputTokens = estimateInputTokens(ctx.rawByteLength);
-    const fitsCheap = inputTokens <= this.options.cheapContextTokens;
+    const budget: Readonly<Record<Tier, number>> = {
+      trivial: this.options.cheapContextTokens,
+      standard: this.options.standardContextTokens ?? this.options.cheapContextTokens,
+      primary: Infinity,
+    };
 
-    const resolve = (route: Route, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
-      const escalatedByContext = route === 'cheap' && !fitsCheap;
-      const final: Route = escalatedByContext ? 'primary' : route;
+    const resolve = (tier: Tier, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
+      const escalatedByContext = inputTokens > budget[tier];
+      const final: Tier = escalatedByContext ? 'primary' : tier;
       this.sessions.set(key, final);
-      return { ...extra, route: final, reason: escalatedByContext ? 'escalated:context' : reason, conversationKey: key };
+      return {
+        ...extra,
+        route: tierRoute(final),
+        tier: final,
+        reason: escalatedByContext ? 'escalated:context' : reason,
+        conversationKey: key,
+      };
     };
     const primary = (reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => ({
       ...extra,
       route: 'primary',
+      tier: 'primary',
       reason,
       conversationKey: key,
     });
 
     // A conversation we hold no state for (proxy restart, TTL expiry) has been
     // running on the primary: keep it there rather than switching mid-flight.
-    const sticky: Route | undefined = fresh ? undefined : (this.sessions.get(key) ?? 'primary');
+    const sticky: Tier | undefined = fresh ? undefined : (this.sessions.get(key) ?? 'primary');
 
     if (sticky === 'primary') return resolve('primary', 'sticky');
 
@@ -126,11 +142,12 @@ export class Router {
     }
     const classifierMs = Math.round(performance.now() - started);
 
-    const proposed = selectRoute(distribution, this.options.policy);
+    const proposed = selectTier(distribution, this.options.policy);
     if (!sticky) return resolve(proposed, 'classified', { distribution, classifierMs });
 
-    const next = stickyRoute(sticky, proposed);
-    return resolve(next, next === sticky ? 'sticky' : 'escalated', { distribution, classifierMs });
+    const next = stickyTier(sticky, proposed);
+    const reason: RouteReason = next === sticky ? 'sticky' : next === 'standard' ? 'escalated:standard' : 'escalated';
+    return resolve(next, reason, { distribution, classifierMs });
   }
 
   /** The cheap provider could not serve this conversation: keep it on the primary from now on. */

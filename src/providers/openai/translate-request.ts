@@ -190,7 +190,16 @@ export function toChatCompletion(body: MessagesBody, options: TranslateOptions):
   }
 
   const tools = translateTools(body['tools'], loadedTools(body.messages));
-  const toolChoice = tools ? translateToolChoice(body['tool_choice']) : undefined;
+  let toolChoice = tools ? translateToolChoice(body['tool_choice']) : undefined;
+
+  // Gemma profile: Ollama's gemma template rejects a null assistant content, and
+  // it handles only auto/none tool_choice; forcing a tool becomes "auto".
+  if (/gemma/i.test(options.model)) {
+    for (const [i, m] of messages.entries()) {
+      if (m.role === 'assistant' && m.content === null) messages[i] = { ...m, content: '' };
+    }
+    if (toolChoice !== undefined && toolChoice !== 'auto' && toolChoice !== 'none') toolChoice = 'auto';
+  }
   const stream = body['stream'] === true;
   const stop = body['stop_sequences'];
 

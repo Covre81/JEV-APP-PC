@@ -6,7 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import { request } from 'undici';
 import { HeuristicClassifier } from '../src/classifier/heuristic-classifier.js';
 import { loadConfig } from '../src/config.js';
-import type { Route } from '../src/domain/policy.js';
+import type { Tier } from '../src/domain/policy.js';
 import { AnthropicProvider } from '../src/providers/anthropic.js';
 import { CheapHealth, type CheapState } from '../src/providers/cheap-health.js';
 import { OpenAICompatibleProvider } from '../src/providers/openai/provider.js';
@@ -112,7 +112,7 @@ describe('cheap route while the cheap provider is down', () => {
       CHEAP_API_KEY: 'k',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: 0.8, standardRoute: 'primary' },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { ClassificationInput, ComplexityClassifier } from '../src/classifier/classifier.js';
 import type { ComplexityDistribution } from '../src/domain/complexity.js';
-import type { Route } from '../src/domain/policy.js';
+import type { Tier } from '../src/domain/policy.js';
 import { MessagesBody } from '../src/routing/messages-body.js';
 import { Router, type RequestContext } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
@@ -21,17 +21,21 @@ class ScriptedClassifier implements ComplexityClassifier {
   }
 }
 
-function setup(script: () => ComplexityDistribution | Error) {
+function setup(script: () => ComplexityDistribution | Error, { standard = false } = {}) {
   const classifier = new ScriptedClassifier(script);
-  const router = new Router(classifier, new TtlLruStore<Route>(100, 60_000), {
-    policy: { minCheapProbability: 0.8, standardRoute: 'primary' },
+  const router = new Router(classifier, new TtlLruStore<Tier>(100, 60_000), {
+    policy: { minCheapProbability: 0.8, standardRoute: 'primary', standardEnabled: standard, minStandardProbability: 0.75 },
     primaryClasses: new Set(['auxiliary', 'compaction']),
     cheapContextTokens: 100_000,
+    standardContextTokens: 250_000,
     classifierTimeoutMs: 1_000,
     classifierMaxChars: 4_000,
   });
   return { classifier, router };
 }
+
+/** Level-2 work: not confidently simple, but little structural mass. */
+const STANDARD: ComplexityDistribution = { simple: 0.4, standard: 0.5, structural: 0.1 };
 
 const user = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] });
 const assistantToolUse = { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] };
@@ -174,6 +178,39 @@ describe('Router (multi-provider)', () => {
     router.pinToPrimary(d);
     const next = await router.decide(ctx([user('rename x'), assistantToolUse, toolResult]));
     assert.equal(next.route, 'primary');
+  });
+
+  it('sends level-2 work to the standard tier on the cheap route, and only ever moves the tier up', async () => {
+    const scripts = [SIMPLE, STANDARD, SIMPLE, STRUCTURAL];
+    const { router } = setup(() => scripts.shift()!, { standard: true });
+    const first = await router.decide(ctx([user('rename x')]));
+    assert.deepEqual([first.route, first.tier, first.reason], ['cheap', 'trivial', 'classified']);
+
+    const t2 = [user('rename x'), assistantText, user('now add pagination to the list')];
+    const up = await router.decide(ctx(t2));
+    assert.deepEqual([up.route, up.tier, up.reason], ['cheap', 'standard', 'escalated:standard']);
+
+    const t3 = [...t2, assistantText, user('fix the typo')];
+    const stay = await router.decide(ctx(t3));
+    assert.deepEqual([stay.route, stay.tier, stay.reason], ['cheap', 'standard', 'sticky'], 'never back down to trivial');
+
+    const top = await router.decide(ctx([...t3, assistantText, user('redesign the layers')]));
+    assert.deepEqual([top.route, top.tier, top.reason], ['primary', 'primary', 'escalated']);
+  });
+
+  it('never picks the standard tier when it is off', async () => {
+    const { router } = setup(() => STANDARD);
+    const d = await router.decide(ctx([user('add pagination')]));
+    assert.deepEqual([d.route, d.tier], ['primary', 'primary']);
+  });
+
+  it('gives the standard tier its own context budget', async () => {
+    const { router } = setup(() => STANDARD, { standard: true });
+    await router.decide(ctx([user('add pagination')]));
+    const fits = await router.decide(ctx([user('add pagination'), assistantToolUse, toolResult], { rawByteLength: 600_000 }));
+    assert.deepEqual([fits.route, fits.tier], ['cheap', 'standard'], '~200k tokens: over trivial, under standard');
+    const over = await router.decide(ctx([user('add pagination'), assistantToolUse, toolResult], { rawByteLength: 1_000_000 }));
+    assert.deepEqual([over.route, over.reason], ['primary', 'escalated:context']);
   });
 
   it('strips system-reminders before classifying', async () => {

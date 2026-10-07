@@ -18,6 +18,8 @@ export interface RouterStats {
   readonly lastAt: Date | null;
   readonly total: number;
   readonly byProvider: Readonly<Record<FinalProvider, ProviderStats>>;
+  /** Cheap-route requests per model: the trivial tier (20B) and the standard tier (Gemma). */
+  readonly cheapByModel: readonly { readonly model: string; readonly requests: number; readonly ok: number }[];
   /** Requests JEV actually scored (the rest were sticky, auxiliary or classifier failures). */
   readonly classified: number;
   /** Cheap provider failed before answering; the request went to Anthropic. */
@@ -93,6 +95,12 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     `SELECT count(*) AS n FROM router_logs ${inWindow} AND final_provider = 'openai' AND outcome = 'stream_error'`,
   ).n;
 
+  const cheapByModel = all<{ model: string; requests: number; ok: number }>(`
+    SELECT coalesce(model, '?') AS model, count(*) AS requests, sum(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END) AS ok
+    FROM router_logs ${inWindow} AND final_provider = 'openai' GROUP BY 1 ORDER BY requests DESC, model`).map((r) => ({
+    ...r,
+  }));
+
   const inspectionMisses = get<{ n: number }>(
     `SELECT coalesce(sum(inspection_miss), 0) AS n FROM router_logs ${inWindow}`,
   ).n;
@@ -116,6 +124,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     lastAt: summary.lastAt === null ? null : new Date(summary.lastAt),
     total: summary.total,
     byProvider,
+    cheapByModel,
     classified: summary.classified,
     fallbacks: summary.fallbacks,
     cheapStreamErrors,
@@ -185,6 +194,11 @@ export function renderStats(s: RouterStats): string {
     ]),
   ]);
 
+  const models =
+    s.cheapByModel.length > 0
+      ? table([['Cheap model', 'Requests', 'OK'], ...s.cheapByModel.map((m) => [m.model, fmt(m.requests), fmt(m.ok)])])
+      : undefined;
+
   const c = s.cost;
   const money = (n: number) => `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(4)}`;
   const verdict = c.netUsd >= 0 ? 'PROFIT' : 'LOSS';
@@ -214,6 +228,7 @@ export function renderStats(s: RouterStats): string {
     overview,
     '',
     providers,
+    ...(models ? ['', models] : []),
     '',
     costs,
     ...(warnings.length > 0 ? ['', ...warnings] : []),

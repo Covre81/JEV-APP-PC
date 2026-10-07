@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { request } from 'undici';
 import { HeuristicClassifier } from '../src/classifier/heuristic-classifier.js';
 import { loadConfig } from '../src/config.js';
-import type { Route } from '../src/domain/policy.js';
+import type { Tier } from '../src/domain/policy.js';
 import { AnthropicProvider } from '../src/providers/anthropic.js';
 import { OpenAICompatibleProvider } from '../src/providers/openai/provider.js';
 import { buildServer } from '../src/proxy/server.js';
@@ -107,13 +107,14 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
 
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       ANTHROPIC_UPSTREAM_URL: anthropic.url,
       CHEAP_BASE_URL: `${cheap.url}/openai/v1`,
       CHEAP_API_KEY: 'gsk_test',
       FAILOVER_ON_PRIMARY_RATE_LIMIT: 'true',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,
@@ -410,6 +411,7 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
     anthropic = await fakeServer(() => anthropicOk, anthropicLog);
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       ANTHROPIC_UPSTREAM_URL: anthropic.url,
       UPSTREAM_AUTH_MODE: 'inject',
       ANTHROPIC_API_KEY: 'sk-ant-proxy-test',
@@ -417,7 +419,7 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
       CHEAP_API_KEY: 'unused',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,
@@ -504,12 +506,13 @@ describe('body limit', () => {
     upstream = await fakeServer(() => anthropicOk, seen);
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       CHEAP_API_KEY: 'unused',
       ANTHROPIC_UPSTREAM_URL: upstream.url,
       BODY_LIMIT_BYTES: '2000',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,

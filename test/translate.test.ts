@@ -108,6 +108,31 @@ describe('toChatCompletion', () => {
     );
   });
 
+  it('applies the gemma profile: no null assistant content, only auto/none tool_choice, system kept', () => {
+    const turn = MessagesBody.parse({
+      model: 'claude-opus-5-5',
+      max_tokens: 1_000,
+      system: 'You are Claude Code',
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'tool', name: 'Read' },
+      messages: [
+        { role: 'user', content: 'read a.ts' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Read', input: { path: 'a.ts' } }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'export {}' }] },
+      ],
+    });
+    const gemma = toChatCompletion(turn, { model: 'gemma4:31b-cloud', maxOutputTokens: 8_192 });
+    assert.deepEqual(gemma.messages[0], { role: 'system', content: 'You are Claude Code' });
+    const assistant = gemma.messages.find((m) => m.role === 'assistant');
+    assert.equal(assistant?.content, '', 'gemma rejects a null content');
+    assert.equal(gemma.tool_choice, 'auto');
+    assert.deepEqual(gemma.messages.at(-1), { role: 'tool', tool_call_id: 't1', content: 'export {}' });
+
+    const gptOss = toChatCompletion(turn, opts);
+    assert.equal(gptOss.messages.find((m) => m.role === 'assistant')?.content, null, 'other models unchanged');
+    assert.deepEqual(gptOss.tool_choice, { type: 'function', function: { name: 'Read' } });
+  });
+
   it('refuses content it cannot map faithfully', () => {
     const withImage = MessagesBody.parse({
       model: 'm',
