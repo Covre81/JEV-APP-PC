@@ -4,10 +4,10 @@ import { z } from 'zod';
 import { getMachineOrigin } from './origin.js';
 import { searchMemory, type MemoryHit } from './memory-source.js';
 import { getGraphSources, type GraphData, type GraphCommunity } from './graph-source.js';
-import { JevClient, JevHttpError } from './jev-client.js';
-import { rankCommunities, type SelectedCommunity } from './relevance.js';
-import { scoreCandidates, type Candidate, type ScoredCandidate } from './select.js';
-import { recordContextRun, type ContextCandidateInput } from './log.js';
+import { JevClient } from './jev-client.js';
+import { rankCommunities, STAGE1_INSTRUCTIONS, type SelectedCommunity } from './relevance.js';
+import { scoreCandidates, STAGE2_INSTRUCTIONS, type Candidate, type ScoredCandidate } from './select.js';
+import { recordContextRun, type ContextCandidateInput, type ContextOutcome } from './log.js';
 import { openTelemetryDb } from '../telemetry/db.js';
 import { defaultTelemetryDbPath } from '../paths.js';
 
@@ -36,14 +36,20 @@ export interface PipelineConfig {
 }
 
 export interface PipelineResult {
-  readonly outcome: 'ok' | 'skipped_origin' | 'config_error' | 'partial' | 'source_error' | 'jev_error' | 'timeout';
+  readonly outcome: ContextOutcome;
   readonly stdout: string;
+  /** Why the outcome is not ok; never carries the key or the prompt. */
+  readonly error?: string;
 }
+
+/** Diagnostic text kept short: it lands in stderr and in context_runs.error. */
+const reasonOf = (err: unknown): string => (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').slice(0, 300);
 
 export async function runPipeline(
   rawInput: unknown,
   config: PipelineConfig
 ): Promise<PipelineResult> {
+  const startedAt = performance.now();
   // 1. Validate stdin
   const parsedInput = StdinSchema.safeParse(rawInput);
   if (!parsedInput.success) {
@@ -52,44 +58,57 @@ export async function runPipeline(
   }
   const input = parsedInput.data;
 
+  // Labels go stale when the questions or the knobs change: hash what JEV is actually asked.
   const pipelineVersionInput = JSON.stringify({
     lCurrent: config.lCurrent,
     lOther: config.lOther,
     maxItems: config.maxItems,
     maxChars: config.maxChars,
-    stage1Question: 'Which of these code/project communities are most relevant to the prompt?',
-    stage2Question: 'Is this item relevant to the user prompt?',
+    stage1Question: STAGE1_INSTRUCTIONS,
+    stage2Question: STAGE2_INSTRUCTIONS,
   });
   const pipelineVersion = createHash('sha256').update(pipelineVersionInput).digest('hex').slice(0, 12);
+
+  /** One row per run; a database problem only costs the row, never the prompt. */
+  const record = (
+    outcome: ContextOutcome,
+    error: string | undefined,
+    candidates: readonly ContextCandidateInput[] = [],
+    injectedChars = 0,
+  ): void => {
+    try {
+      const dbPath = process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath();
+      if (!existsSync(dirname(dbPath))) return;
+      const db = openTelemetryDb(dbPath);
+      try {
+        recordContextRun(
+          db,
+          {
+            sessionId: input.session_id,
+            promptHash: createHash('sha256').update(input.prompt).digest('hex'),
+            promptChars: input.prompt.length,
+            mode: config.mode,
+            outcome,
+            pipelineVersion,
+            injected: injectedChars > 0,
+            injectedChars,
+            latencyMs: Math.round(performance.now() - startedAt),
+            error: error ?? null,
+          },
+          candidates,
+        );
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      process.stderr.write(`[context] SQLite failure: ${reasonOf(err)}\n`);
+    }
+  };
 
   // 2. Check for machine origin
   const machineOrigin = getMachineOrigin(input.prompt);
   if (machineOrigin) {
-    try {
-      const dbPath = process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath();
-      if (existsSync(dirname(dbPath))) {
-        const db = openTelemetryDb(dbPath);
-        try {
-          recordContextRun(
-            db,
-            {
-              sessionId: input.session_id,
-              prompt: input.prompt,
-              mode: config.mode,
-              outcome: 'skipped_origin',
-              pipelineVersion,
-              injected: false,
-              injectedChars: 0,
-            },
-            []
-          );
-        } finally {
-          db.close();
-        }
-      }
-    } catch {
-      // Ignored db error
-    }
+    record('skipped_origin', machineOrigin);
     return { outcome: 'skipped_origin', stdout: '' };
   }
 
@@ -99,32 +118,9 @@ export async function runPipeline(
 
   // 3. Check for API key configuration
   if (!config.apiKey) {
-    try {
-      const dbPath = process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath();
-      if (existsSync(dirname(dbPath))) {
-        const db = openTelemetryDb(dbPath);
-        try {
-          recordContextRun(
-            db,
-            {
-              sessionId: input.session_id,
-              prompt: input.prompt,
-              mode: config.mode,
-              outcome: 'config_error',
-              pipelineVersion,
-              injected: false,
-              injectedChars: 0,
-            },
-            []
-          );
-        } finally {
-          db.close();
-        }
-      }
-    } catch {
-      // Ignored db error
-    }
-    return { outcome: 'config_error', stdout: '' };
+    const error = 'TYPESAFE_API_KEY is not set';
+    record('config_error', error);
+    return { outcome: 'config_error', stdout: '', error };
   }
 
   // Setup AbortController for global timeout
@@ -132,6 +128,7 @@ export async function runPipeline(
   const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
 
   let finalOutcome: 'ok' | 'partial' | 'source_error' | 'jev_error' | 'timeout' = 'ok';
+  const errors: string[] = [];
   let memoryHits: readonly MemoryHit[] = [];
   let graphSources: readonly GraphData[] = [];
   let memoryFailed = false;
@@ -150,6 +147,7 @@ export async function runPipeline(
         });
       } catch (err) {
         memoryFailed = true;
+        errors.push(`memory: ${reasonOf(err)}`);
         return [];
       }
     })();
@@ -160,6 +158,7 @@ export async function runPipeline(
         return getGraphSources(config.graphRoot, input.cwd);
       } catch (err) {
         graphFailed = true;
+        errors.push(`graph: ${reasonOf(err)}`);
         return [];
       }
     })();
@@ -178,6 +177,7 @@ export async function runPipeline(
       finalOutcome = 'timeout';
     } else {
       finalOutcome = 'source_error';
+      errors.push(`sources: ${reasonOf(err)}`);
     }
   }
 
@@ -250,10 +250,10 @@ export async function runPipeline(
     } catch (err: any) {
       if (err.name === 'AbortError' || controller.signal.aborted) {
         finalOutcome = 'timeout';
-      } else if (err instanceof JevHttpError || err.name === 'ZodError') {
-        finalOutcome = 'jev_error';
       } else {
+        // HTTP status + API reason (JevHttpError), schema path (JevSchemaError) or a network error.
         finalOutcome = 'jev_error';
+        errors.push(`jev: ${reasonOf(err)}`);
       }
     }
   }
@@ -263,7 +263,9 @@ export async function runPipeline(
   // If timeout was triggered during execution, override outcome
   if (controller.signal.aborted) {
     finalOutcome = 'timeout';
+    errors.push(`timeout after ${config.timeoutMs} ms`);
   }
+  const error = errors.length > 0 ? errors.join('; ') : undefined;
 
   // 8. Thresholding, Grouping, and Filtering
   const selectedMemoryItems: ScoredCandidate[] = [];
@@ -376,31 +378,7 @@ export async function runPipeline(
   }
 
   // 9. Db Logging
-  try {
-    const dbPath = process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath();
-    if (existsSync(dirname(dbPath))) {
-      const db = openTelemetryDb(dbPath);
-      try {
-        recordContextRun(
-          db,
-          {
-            sessionId: input.session_id,
-            prompt: input.prompt,
-            mode: config.mode,
-            outcome: finalOutcome,
-            pipelineVersion,
-            injected: hasInjected,
-            injectedChars: injectedContextStr.length,
-          },
-          evaluatedCandidates
-        );
-      } finally {
-        db.close();
-      }
-    }
-  } catch (err: any) {
-    process.stderr.write(`SQLite failure: ${err.message}\n`);
-  }
+  record(finalOutcome, error, evaluatedCandidates, hasInjected ? injectedContextStr.length : 0);
 
   // 10. Stdout Output
   let stdoutResult = '';
@@ -416,6 +394,7 @@ export async function runPipeline(
   return {
     outcome: finalOutcome,
     stdout: stdoutResult,
+    ...(error ? { error } : {}),
   };
 }
 

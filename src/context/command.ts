@@ -12,7 +12,7 @@ const HookConfigSchema = z.looseObject({
   CONTEXT_AI_MEMORY_BIN: z.string().default('ai-memory'),
   TYPESAFE_API_KEY: z.string().optional(),
   JEV_API_URL: z.string().default('https://api.typesafe.ai/v1/systemone'),
-  JEV_MODEL: z.string().default('jev-1.13.0'),
+  JEV_MODEL: z.string().default('jev-latest'),
 });
 
 export async function runContextHook(explicitEnvFile?: string): Promise<number> {
@@ -67,7 +67,7 @@ export async function runContextHook(explicitEnvFile?: string): Promise<number> 
     }
 
     if (result.outcome !== 'ok' && result.outcome !== 'skipped_origin') {
-      process.stderr.write(`[context] Pipeline completed with outcome: ${result.outcome}\n`);
+      process.stderr.write(`[context] Pipeline completed with outcome: ${result.outcome}${result.error ? `: ${result.error}` : ''}\n`);
     }
 
     return 0;

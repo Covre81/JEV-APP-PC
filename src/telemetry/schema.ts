@@ -139,6 +139,13 @@ export const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX context_runs_session_id_idx ON context_runs (session_id);
   CREATE INDEX context_candidates_run_id_idx ON context_candidates (run_id);`,
+  // The context hook stored the prompt itself, which may carry pasted secrets: keep a hash
+  // and the length, as router_logs does, and record why a run failed and how long it took.
+  `ALTER TABLE context_runs DROP COLUMN prompt;
+  ALTER TABLE context_runs ADD prompt_hash text;
+  ALTER TABLE context_runs ADD prompt_chars integer;
+  ALTER TABLE context_runs ADD latency_ms integer;
+  ALTER TABLE context_runs ADD error text;`,
 ];
 
 /**

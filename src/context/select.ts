@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import type { JevClient } from './jev-client.js';
+import { JevSchemaError, parseJev, type JevClient } from './jev-client.js';
+
+export const STAGE2_INSTRUCTIONS = 'Is the following project context item highly relevant to understanding, explaining, or answering this prompt?';
 
 const JevNoulResponseSchema = z.looseObject({
   answers: z.record(
@@ -61,7 +63,7 @@ export async function scoreCandidates(options: {
 
         questions[cand.id] = {
           type: 'noul',
-          instructions: `Is the following project context item highly relevant to understanding, explaining, or answering this prompt?\nPrompt: "${options.prompt}"\nContext Item:\n${itemDesc}`,
+          instructions: `${STAGE2_INSTRUCTIONS}\nPrompt: "${options.prompt}"\nContext Item:\n${itemDesc}`,
         };
       }
 
@@ -71,26 +73,13 @@ export async function scoreCandidates(options: {
         questions,
       };
 
-      try {
-        const rawPayload = await options.client.postSystemOne(requestBody, options.signal);
-        const parsed = JevNoulResponseSchema.parse(rawPayload);
-        const answers = parsed.answers;
-
-        const result: ScoredCandidate[] = [];
-        for (const cand of batch) {
-          const ans = answers[cand.id];
-          if (!ans) {
-            throw new Error(`Missing answer for candidate ${cand.id}`);
-          }
-          result.push({
-            ...cand,
-            p: ans.noul,
-          });
-        }
-        return result;
-      } catch (err) {
-        throw err;
-      }
+      const rawPayload = await options.client.postSystemOne(requestBody, options.signal);
+      const { answers } = parseJev(JevNoulResponseSchema, rawPayload);
+      return batch.map((cand): ScoredCandidate => {
+        const ans = answers[cand.id];
+        if (!ans) throw new JevSchemaError(`schema: answers.${cand.id}: missing`);
+        return { ...cand, p: ans.noul };
+      });
     })
   );
 

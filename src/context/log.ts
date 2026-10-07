@@ -1,14 +1,21 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { inTransaction } from '../telemetry/db.js';
 
+export type ContextOutcome = 'ok' | 'skipped_origin' | 'config_error' | 'partial' | 'source_error' | 'jev_error' | 'timeout';
+
 export interface ContextRunInput {
   readonly sessionId: string;
-  readonly prompt: string;
+  /** sha256 of the prompt: the text itself is never stored (it may hold pasted secrets). */
+  readonly promptHash: string;
+  readonly promptChars: number;
   readonly mode: 'inject' | 'shadow' | 'off';
-  readonly outcome: 'ok' | 'skipped_origin' | 'config_error' | 'partial' | 'source_error' | 'jev_error' | 'timeout';
+  readonly outcome: ContextOutcome;
   readonly pipelineVersion: string;
   readonly injected: boolean;
   readonly injectedChars: number;
+  readonly latencyMs: number;
+  /** Why the outcome is not ok: HTTP status and reason, schema path, which source fell. */
+  readonly error: string | null;
 }
 
 export interface ContextCandidateInput {
@@ -34,20 +41,23 @@ export function recordContextRun(
   inTransaction(db, () => {
     const insertRun = db.prepare(`
       INSERT INTO context_runs (
-        session_id, prompt, mode, outcome, pipeline_version, injected, injected_chars
+        session_id, prompt_hash, prompt_chars, mode, outcome, pipeline_version, injected, injected_chars, latency_ms, error
       ) VALUES (
-        @sessionId, @prompt, @mode, @outcome, @pipelineVersion, @injected, @injectedChars
+        @sessionId, @promptHash, @promptChars, @mode, @outcome, @pipelineVersion, @injected, @injectedChars, @latencyMs, @error
       )
     `);
 
     const runResult = insertRun.run({
       sessionId: run.sessionId,
-      prompt: run.prompt,
+      promptHash: run.promptHash,
+      promptChars: run.promptChars,
       mode: run.mode,
       outcome: run.outcome,
       pipelineVersion: run.pipelineVersion,
       injected: run.injected ? 1 : 0,
       injectedChars: run.injectedChars,
+      latencyMs: run.latencyMs,
+      error: run.error,
     });
 
     runId = Number(runResult.lastInsertRowid);
