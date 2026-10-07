@@ -77,6 +77,13 @@ describe('stickyTier', () => {
     assert.equal(stickyTier('standard', 'primary'), 'primary');
     assert.equal(stickyTier('primary', 'trivial'), 'primary');
   });
+
+  it('is total and keeps gemini out of ranking', () => {
+    assert.equal(stickyTier('gemini', 'trivial'), 'trivial');
+    assert.equal(stickyTier('standard', 'gemini'), 'standard');
+    assert.equal(stickyTier('gemini', 'primary'), 'primary');
+    assert.equal(stickyTier('gemini', 'gemini'), 'primary');
+  });
 });
 
 describe('stickyRoute', () => {

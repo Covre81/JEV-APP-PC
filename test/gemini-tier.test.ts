@@ -1,5 +1,8 @@
 import { meterAnthropicBody } from '../src/telemetry/usage-meter.js';
-import { GeminiCliProvider } from '../src/providers/gemini/provider';
+import { jevRequestBody, parseJevTextOnly, parseJevRisk } from '../src/classifier/jev-classifier.js';
+import { Router } from '../src/routing/router.js';
+import { TtlLruStore } from '../src/routing/session-store.js';
+import { GeminiCliProvider } from '../src/providers/gemini/provider.js';
 import { stat } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
@@ -54,8 +57,31 @@ describe('Gemini tier unit tests', () => {
   });
 
   describe('Classifier', () => {
-    // Note: jevRequestBody and parseJevTextOnly/Risk are part of src/classifier/jev-classifier.ts
-    // Tested implicitly if required, but let's test policy first.
+    it('jevRequestBody textOnly parameter', () => {
+      const b1 = jevRequestBody('model1', 'hi' as any) as any;
+      assert.equal(b1.questions.text_answer_suffices, undefined);
+      
+      const b2 = jevRequestBody('model1', 'hi' as any, true) as any;
+      assert.equal(b2.questions.text_answer_suffices?.type, 'noul');
+    });
+
+    it('parseJevTextOnly', () => {
+      assert.equal(parseJevTextOnly({} as any), undefined);
+      assert.equal(parseJevTextOnly({ answers: {} } as any), undefined);
+      assert.equal(parseJevTextOnly({ answers: { text_answer_suffices: { noul: 0.95 } } } as any), 0.95);
+    });
+
+    it('parseJevRisk with text_answer_suffices', () => {
+      const payload = {
+        answers: {
+          text_answer_suffices: { noul: 0.99 },
+          security_sensitive: { noul: 0.1 },
+          destructive_or_production: { noul: 0.1 },
+          requires_inspection: { noul: 0.1 }
+        }
+      } as any;
+      assert.equal(parseJevRisk(payload), 0.1);
+    });
   });
 
   describe('Policy/router - geminiEligible', () => {
@@ -444,10 +470,14 @@ describe('Gemini tier unit tests', () => {
       assert.equal(res.kind, 'response');
       const responseRes = res as any;
       
+      const metered = meterAnthropicBody(responseRes.body, 'application/json', undefined);
+      
       let sentStr = '';
-      for await (const chunk of responseRes.body) {
+      for await (const chunk of metered.body) {
         sentStr += chunk.toString();
       }
+      await metered.settled;
+      assert.deepEqual(metered.usage(), { tokensIn: 5, tokensOut: 6, cacheReadTokens: 0, cacheWriteTokens: 0 });
       
       const body = JSON.parse(sentStr);
       assert.equal(body.type, 'message');
@@ -486,10 +516,14 @@ describe('Gemini tier unit tests', () => {
       assert.equal(streamRes.headers['cache-control'], 'no-cache');
       assert.equal(streamRes.headers['content-type'], 'text/event-stream');
       
+      const metered = meterAnthropicBody(streamRes.body, 'text/event-stream', undefined);
+      
       let sentStr = '';
-      for await (const chunk of streamRes.body) {
+      for await (const chunk of metered.body) {
         sentStr += chunk.toString();
       }
+      await metered.settled;
+      assert.deepEqual(metered.usage(), { tokensIn: 5, tokensOut: 6, cacheReadTokens: 0, cacheWriteTokens: 0 });
       
       const events = [];
       const lines = sentStr.split('\n');
@@ -507,12 +541,12 @@ describe('Gemini tier unit tests', () => {
         }
       }
 
-      assert.equal(events[0].event, 'message_start');
-      assert.deepEqual(events[0].data.message.content, []);
-      assert.equal(events[0].data.message.stop_reason, null);
-      assert.equal(events[0].data.message.model, 'model1');
-      assert.equal(events[1].event, 'content_block_start');
-      assert.equal(events[2].event, 'content_block_delta');
+      assert.equal(events[0]?.event, 'message_start');
+      assert.deepEqual(events[0]?.data?.message?.content, []);
+      assert.equal(events[0]?.data?.message?.stop_reason, null);
+      assert.equal(events[0]?.data?.message?.model, 'model1');
+      assert.equal(events[1]?.event, 'content_block_start');
+      assert.equal(events[2]?.event, 'content_block_delta');
       
       let reconstructed = '';
       let stopReason = null;

@@ -154,7 +154,7 @@ export class Router {
     const humanText = latestHumanText(ctx.body);
     // Quota nearly gone: a new human turn on Claude may leave it. Tool loops never do.
     const reclassify = level === 'critical' && humanText !== undefined && stored === 'primary' && (sticky === 'primary' || ctx.contextCompacted);
-    const classifyForGemini = this.options.geminiPolicy?.enabled && this.options.geminiFromPrimary && humanText !== undefined && stored === 'primary' && !reclassify;
+    const classifyForGemini = this.options.geminiPolicy?.enabled && this.options.geminiFromPrimary && humanText !== undefined && sticky === 'primary' && !reclassify;
 
     if (sticky === 'primary' && !reclassify && !classifyForGemini) return resolve('primary', 'sticky');
     if (humanText === undefined) {

@@ -101,6 +101,8 @@ describe('Gemini Tier E2E', () => {
 
     const router = new Router(classifier as any, store, {
       policy: { minCheapProbability: 0.9, standardRoute: 'primary', standardEnabled: false },
+      primaryClasses: new Set(['complex', 'auxiliary']),
+      cheapContextTokens: 4000,
       ...(config.gemini ? {
         geminiPolicy: {
           enabled: true,
@@ -110,12 +112,13 @@ describe('Gemini Tier E2E', () => {
         geminiFromPrimary: config.gemini.fromPrimary
       } : {}),
       classifierMaxChars: 4000,
-      classifierTimeoutMs: 1500,
-      log: console as any
+      classifierTimeoutMs: 1500
     });
 
     const geminiBreaker = config.gemini ? new CircuitBreaker(config.gemini.breakerFailures, config.gemini.breakerCooldownMs, config.gemini.maxConcurrency) : undefined;
-    const proxy = buildServer({ config, router, telemetry, providers, geminiBreaker });
+    const proxyOptions: any = { config, router, telemetry, providers };
+    if (geminiBreaker) proxyOptions.geminiBreaker = geminiBreaker;
+    const proxy = buildServer(proxyOptions);
     await proxy.listen({ port: 0, host: '127.0.0.1' });
     return { proxy, url: `http://127.0.0.1:${(proxy.server.address() as AddressInfo).port}` };
   }

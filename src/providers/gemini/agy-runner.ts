@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -36,7 +36,7 @@ export async function runAgy(
       '--print='
     ];
 
-    const childEnv = { ...process.env, USERPROFILE: opts.home, HOME: opts.home };
+    const childEnv: NodeJS.ProcessEnv = { ...process.env, USERPROFILE: opts.home, HOME: opts.home };
     const stripKeys = [
       'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_API_KEY',
       'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT'
@@ -175,16 +175,12 @@ export async function runAgy(
       const baseDir = join(opts.home, '.gemini', 'antigravity-cli');
       try { await rm(join(baseDir, 'brain', conversationId), { recursive: true, force: true }); } catch {}
       try { await rm(join(baseDir, 'annotations', `${conversationId}.pbtxt`), { force: true }); } catch {}
-      // agy sometimes writes files starting with conversationId in conversations/
-      // Wait, there is no direct wildcard `rm`, we can just read the dir if needed, but the bug says "delete conversations/<conversation_id>* files if present"
-      // Node 22 doesn't have a simple wildcard `rm`. Let's just delete the specific known prefixes or use readdir.
       try {
-        const fs = await import('node:fs/promises');
         const convDir = join(baseDir, 'conversations');
-        const files = await fs.readdir(convDir);
+        const files = await readdir(convDir);
         for (const f of files) {
           if (f.startsWith(conversationId)) {
-            await fs.rm(join(convDir, f), { force: true, recursive: true });
+            await rm(join(convDir, f), { force: true, recursive: true });
           }
         }
       } catch {}
