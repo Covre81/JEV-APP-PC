@@ -6,3 +6,7 @@ graphify-out/
 .cursor/
 .ai-memory.toml
 scripts/eval-jev.local.json
+*.db
+.env.*
+!.env.example
+.claude/

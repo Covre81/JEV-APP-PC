@@ -277,7 +277,7 @@ const GREET = `export function greet(name: string): string {
 
 const MAIN = `import { greet } from './greet.js';
 
-console.log(greet('Bruno'));
+console.log(greet('Ada'));
 `;
 
 const CONFIG = `{
@@ -308,7 +308,7 @@ export const TASKS: readonly BenchTask[] = [
       const main = ws.file('main.ts') ?? '';
       if (!greet.includes('export function welcome(name: string)')) return 'greet.ts does not export welcome';
       if (!main.includes("import { welcome } from './greet.js'")) return 'main.ts import not updated';
-      if (!main.includes("welcome('Bruno')")) return 'main.ts call not updated';
+      if (!main.includes("welcome('Ada')")) return 'main.ts call not updated';
       if (/\bgreet\(/.test(greet + main)) return 'a greet( call remains';
       return null;
     },
