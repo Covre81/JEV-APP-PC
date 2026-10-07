@@ -14,6 +14,7 @@ Commands:
   reload           Swap in a freshly built worker without dropping open sessions
   stats           Print routing and token-savings statistics from the telemetry database
   statusline       One line for Claude Code's statusLine: router health and this session's last route
+  context          Evaluate and inject ai-memory / graphify context for prompts
   help             Show this message
 
 Options:
@@ -103,6 +104,11 @@ async function main(argv: string[]): Promise<number> {
         db.close();
       }
       return 0;
+    }
+    case 'context': {
+      const { runContextHook } = await import('./context/command.js');
+      const code = await runContextHook(values.env);
+      return code;
     }
     case 'statusline': {
       const [{ readSessionId, statusLine }, { readBuildInfo }] = await Promise.all([

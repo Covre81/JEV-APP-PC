@@ -115,6 +115,30 @@ export const MIGRATIONS: readonly string[] = [
     reset_at integer
   );
   ALTER TABLE router_logs ADD quota_utilization real;`,
+  `CREATE TABLE context_runs (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
+    session_id text NOT NULL,
+    prompt text NOT NULL,
+    mode text NOT NULL,
+    outcome text NOT NULL,
+    pipeline_version text NOT NULL,
+    injected integer DEFAULT 0 NOT NULL,
+    injected_chars integer DEFAULT 0 NOT NULL
+  );
+  CREATE TABLE context_candidates (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    run_id integer NOT NULL,
+    type text NOT NULL,
+    path text NOT NULL,
+    title text,
+    content text NOT NULL,
+    p real NOT NULL CHECK (p BETWEEN 0 AND 1),
+    injected integer DEFAULT 0 NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES context_runs (id) ON DELETE CASCADE
+  );
+  CREATE INDEX context_runs_session_id_idx ON context_runs (session_id);
+  CREATE INDEX context_candidates_run_id_idx ON context_candidates (run_id);`,
 ];
 
 /**

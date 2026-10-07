@@ -532,6 +532,32 @@ Groq and OpenRouter are both OpenAI-compatible: point `CHEAP_BASE_URL` /
 `CHEAP_API_KEY` / `CHEAP_MODEL` at either one and run `bench.ts`, which already
 streams through the real SSE translation.
 
+## Context Injection Hook (`jev-router context`)
+
+The `jev-router context` hook is a prompt injection hook designed for Claude Code. On every human prompt, it reads `prompt`, `session_id`, `cwd`, and `transcript_path` from `stdin` in JSON format, searches parallel sources (`ai-memory` wiki and `graphify` dependency graphs), ranks items using TypeSafe JEV System One (Stage 1 Choice and Stage 2 Noul-based relevance tests), and outputs prompt context injections.
+
+### Hook Input Format (stdin)
+The hook accepts a JSON object on standard input containing:
+```json
+{
+  "prompt": "help me with standard routing",
+  "session_id": "session-uuid",
+  "cwd": "C:\\Dev\\JEV-APP-PC"
+}
+```
+
+### Hook Output Format (stdout)
+If matching context items are found and `CONTEXT_MODE=inject`, the hook outputs the following JSON to `stdout` containing the additional prompt context:
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "[memória] título (path): trecho\n[grafo] projeto › comunidade: nós"
+  }
+}
+```
+If no items are found, or the mode is set to `shadow` or `off`, the output to `stdout` remains completely empty.
+
 ### Bench history
 
 Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MODEL`, and add a row.

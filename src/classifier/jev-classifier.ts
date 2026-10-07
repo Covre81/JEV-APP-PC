@@ -1,7 +1,7 @@
-import { request } from 'undici';
 import { z } from 'zod';
 import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
 import type { Classification, ClassificationInput, ComplexityClassifier } from './classifier.js';
+import { JevClient } from '../context/jev-client.js';
 
 /**
  * Adapter for TypeSafe JEV (`POST /v1/systemone`).
@@ -78,20 +78,8 @@ export class JevClassifier implements ComplexityClassifier {
   constructor(private readonly options: JevClassifierOptions) {}
 
   async classify(input: ClassificationInput, signal: AbortSignal): Promise<Classification> {
-    const res = await request(this.options.apiUrl, {
-      method: 'POST',
-      signal,
-      headers: {
-        authorization: `Bearer ${this.options.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(jevRequestBody(this.options.model, input)),
-    });
-
-    const payload: unknown = await res.body.json();
-    if (res.statusCode !== 200) {
-      throw new Error(`JEV HTTP ${res.statusCode}: ${JSON.stringify(payload).slice(0, 300)}`);
-    }
+    const client = new JevClient({ apiUrl: this.options.apiUrl, apiKey: this.options.apiKey });
+    const payload = await client.postSystemOne(jevRequestBody(this.options.model, input), signal);
 
     const usage = JevUsage.safeParse(payload);
     const model = JevModel.safeParse(payload);
