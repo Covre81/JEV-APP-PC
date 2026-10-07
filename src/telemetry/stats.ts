@@ -45,6 +45,8 @@ export interface RouterStats {
   readonly cost: NetCost;
   readonly cheapPriceUnset: boolean;
   readonly jevPriceUnset: boolean;
+  readonly geminiFallbacks: number;
+  readonly geminiSkipped: number;
 }
 
 export interface StatsOptions {
@@ -69,7 +71,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
       coalesce(sum(cache_read_tokens), 0) AS cacheReadTokens, avg(latency_ms) AS avgLatencyMs
     FROM router_logs ${inWindow} GROUP BY final_provider`);
 
-  const byProvider: Record<FinalProvider, ProviderStats> = { anthropic: EMPTY, openai: EMPTY };
+  const byProvider: Record<FinalProvider, ProviderStats> = { anthropic: EMPTY, openai: EMPTY, gemini: EMPTY };
   for (const r of rows) {
     byProvider[r.provider] = {
       requests: r.requests,
@@ -88,12 +90,16 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     classified: number;
     fallbacks: number;
     saved: number;
+    geminiFallbacks: number;
+    geminiSkipped: number;
   }>(`
     SELECT count(*) AS total, min(created_at) AS firstAt, max(created_at) AS lastAt,
       coalesce(sum(CASE WHEN jev_decision IS NOT NULL THEN 1 ELSE 0 END), 0) AS classified,
       coalesce(sum(fallback_triggered), 0) AS fallbacks,
-      coalesce(sum(CASE WHEN final_provider = 'openai' AND outcome = 'ok'
-        THEN coalesce(tokens_in, 0) + coalesce(tokens_out, 0) ELSE 0 END), 0) AS saved
+      coalesce(sum(CASE WHEN final_provider IN ('openai', 'gemini') AND outcome = 'ok'
+        THEN coalesce(tokens_in, 0) + coalesce(tokens_out, 0) ELSE 0 END), 0) AS saved,
+      coalesce(sum(CASE WHEN route_reason = 'failover:gemini-unavailable' THEN 1 ELSE 0 END), 0) AS geminiFallbacks,
+      coalesce(sum(CASE WHEN route_reason IN ('skipped:gemini-unhealthy', 'skipped:gemini-busy') THEN 1 ELSE 0 END), 0) AS geminiSkipped
     FROM router_logs ${inWindow}`);
 
   const cheapStreamErrors = get<{ n: number }>(
@@ -148,6 +154,8 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     cost: computeNetCost(costRows, pricing),
     cheapPriceUnset: pricing.cheapPriceUnset,
     jevPriceUnset: pricing.jevPriceUnset,
+    geminiFallbacks: summary.geminiFallbacks,
+    geminiSkipped: summary.geminiSkipped,
   };
 }
 
@@ -173,6 +181,7 @@ function table(rows: readonly (readonly string[])[]): string {
 export function renderStats(s: RouterStats): string {
   const a = s.byProvider.anthropic;
   const o = s.byProvider.openai;
+  const g = s.byProvider.gemini;
   const window = s.since ? `since ${s.since.toISOString()}` : 'all time';
   const span = s.firstAt && s.lastAt ? `${s.firstAt.toISOString()} → ${s.lastAt.toISOString()}` : 'no data';
 
@@ -182,6 +191,9 @@ export function renderStats(s: RouterStats): string {
     ['Diverted from Anthropic (cheap route)', `${fmt(o.requests)} (${pct(o.requests, s.total)})`],
     ['  served OK by cheap provider', fmt(o.ok)],
     ['  cheap stream errors (retried on Anthropic)', fmt(s.cheapStreamErrors)],
+    ['Diverted to Gemini (subscription)', `${fmt(g.requests)} (${pct(g.requests, s.total)})`],
+    ['  served OK by Gemini', fmt(g.ok)],
+    ['  Gemini skipped (breaker/busy)', fmt(s.geminiSkipped)],
     ['Cheap answers without tool use (inspection miss)', fmt(s.inspectionMisses)],
     ['Sent cheap by quota pressure', fmt(s.quotaRouted)],
     [
@@ -189,6 +201,7 @@ export function renderStats(s: RouterStats): string {
       s.lastQuota ? `${Math.round(s.lastQuota.utilization * 100)}% ${s.lastQuota.window}` : '—',
     ],
     ['Fallbacks cheap → Anthropic', fmt(s.fallbacks)],
+    ['Fallbacks Gemini → Claude', fmt(s.geminiFallbacks)],
     ['Scored by JEV', fmt(s.classified)],
     ['Repeated prompts (extra sends)', `${fmt(s.repeatedPrompts)} (${fmt(s.repeatedSends)})`],
     ['Estimated Anthropic tokens saved', fmt(s.estimatedTokensSaved)],
@@ -200,6 +213,7 @@ export function renderStats(s: RouterStats): string {
       [
         ['anthropic', a],
         ['openai (cheap)', o],
+        ['gemini (subscription)', g],
       ] as const
     ).map(([name, p]) => [
       name,

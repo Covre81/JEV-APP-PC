@@ -60,6 +60,18 @@ const Env = z
 
     TELEMETRY_ENABLED: bool.default(true),
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
+    GEMINI_TIER: z.enum(['off', 'on']).default('off'),
+    GEMINI_TIER_BIN: z.string().default(process.platform === 'win32' ? '%LOCALAPPDATA%\\agy\\bin\\agy.exe' : 'agy'),
+    GEMINI_TIER_MODEL: z.string().default('gemini-3.1-pro-high'),
+    GEMINI_TIER_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+    GEMINI_TIER_MIN_TEXT_ONLY: z.coerce.number().min(0).max(1).default(0.8),
+    GEMINI_TIER_PRESSURE_MIN_TEXT_ONLY: z.coerce.number().min(0).max(1).default(0.6),
+    GEMINI_TIER_FROM_PRIMARY: bool.default(true),
+    GEMINI_TIER_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(1),
+    GEMINI_TIER_MAX_PROMPT_CHARS: z.coerce.number().int().positive().default(200_000),
+    GEMINI_TIER_BREAKER_FAILURES: z.coerce.number().int().min(1).default(3),
+    GEMINI_TIER_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(300_000),
+    GEMINI_TIER_HOME: z.string().optional(), // defaults to <jevHome()>/agy-home in loadConfig
   })
   .superRefine((env, ctx) => {
     if (env.QUOTA_CRITICAL < env.QUOTA_PRESSURE) {
@@ -163,6 +175,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       failoverOnPrimaryRateLimit: e.FAILOVER_ON_PRIMARY_RATE_LIMIT,
       sessionTtlMs: e.SESSION_TTL_MS,
     },
+    gemini:
+      e.GEMINI_TIER === 'off'
+        ? undefined
+        : {
+            bin: e.GEMINI_TIER_BIN,
+            model: e.GEMINI_TIER_MODEL,
+            timeoutMs: e.GEMINI_TIER_TIMEOUT_MS,
+            minTextOnly: e.GEMINI_TIER_MIN_TEXT_ONLY,
+            pressureMinTextOnly: e.GEMINI_TIER_PRESSURE_MIN_TEXT_ONLY,
+            fromPrimary: e.GEMINI_TIER_FROM_PRIMARY,
+            maxConcurrency: e.GEMINI_TIER_MAX_CONCURRENCY,
+            maxPromptChars: e.GEMINI_TIER_MAX_PROMPT_CHARS,
+            breakerFailures: e.GEMINI_TIER_BREAKER_FAILURES,
+            breakerCooldownMs: e.GEMINI_TIER_BREAKER_COOLDOWN_MS,
+            home: e.GEMINI_TIER_HOME ?? (process.env.JEV_HOME ?? process.env.HOME ?? process.env.USERPROFILE ?? '') + '/agy-home',
+          },
     // dbPath is undefined when telemetry is disabled.
     telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
   };

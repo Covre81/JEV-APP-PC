@@ -1,11 +1,12 @@
 import type { Classification, ComplexityClassifier } from '../classifier/classifier.js';
 import type { ComplexityDistribution } from '../domain/complexity.js';
-import { selectTier, stickyTier, tierRoute, type PolicyOptions, type Route, type Tier } from '../domain/policy.js';
+import { selectTier, stickyTier, tierRoute, geminiEligible, type PolicyOptions, type Route, type Tier } from '../domain/policy.js';
 import {
   conversationFingerprint,
   estimateInputTokens,
   isFreshConversation,
   latestHumanText,
+  hasImageDocumentOrToolChoice,
   type MessagesBody,
 } from './messages-body.js';
 import type { QuotaLevel } from '../quota.js';
@@ -25,12 +26,18 @@ export type RouteReason =
   | 'pinned:compaction'
   | 'quota:pressure'
   | 'quota:reclassified'
-  | 'failover:primary-rate-limited';
+  | 'failover:primary-rate-limited'
+  | 'gemini:text-only'
+  | 'gemini:text-only:pressure'
+  | 'skipped:gemini-unhealthy'
+  | 'skipped:gemini-busy'
+  | 'failover:gemini-unavailable';
 
 export interface RouteDecision {
   readonly route: Route;
   /** Which cheap model serves a cheap route; absent on decisions built outside the router. */
   readonly tier?: Tier;
+  readonly fallbackTier?: Tier;
   readonly reason: RouteReason;
   readonly conversationKey: string | undefined;
   readonly distribution?: Classification;
@@ -62,9 +69,11 @@ export interface RouterOptions {
   readonly quota?: { level(): QuotaLevel };
   /** Bars used from `pressure` on; each only lowers the normal one. */
   readonly pressurePolicy?: { readonly minCheapProbability: number; readonly minStandardProbability: number };
+  readonly geminiPolicy?: import('../domain/policy.js').GeminiPolicyOptions;
+  readonly geminiFromPrimary?: boolean;
 }
 
-const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, primary: 2 };
+const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, primary: 2, gemini: 1.5 };
 
 /**
  * Multi-provider router: decides, per conversation, between a cheap
@@ -101,6 +110,7 @@ export class Router {
       trivial: this.options.cheapContextTokens,
       standard: this.options.standardContextTokens ?? this.options.cheapContextTokens,
       primary: Infinity,
+      gemini: Infinity,
     };
 
     const resolve = (tier: Tier, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
@@ -139,14 +149,16 @@ export class Router {
     const stored: Tier = this.sessions.get(key) ?? 'primary';
     // Compaction used to count as a fresh start, dropping long Claude sessions on the 20B.
     if (ctx.contextCompacted && stored === 'primary' && level !== 'critical') return resolve('primary', 'pinned:compaction');
-    const sticky: Tier | undefined = fresh ? undefined : stored;
+    const sticky: Tier | undefined = (fresh || stored === 'gemini') ? undefined : stored;
 
     const humanText = latestHumanText(ctx.body);
     // Quota nearly gone: a new human turn on Claude may leave it. Tool loops never do.
     const reclassify = level === 'critical' && humanText !== undefined && stored === 'primary' && (sticky === 'primary' || ctx.contextCompacted);
+    const classifyForGemini = this.options.geminiPolicy?.enabled && this.options.geminiFromPrimary && humanText !== undefined && stored === 'primary' && !reclassify;
 
-    if (sticky === 'primary' && !reclassify) return resolve('primary', 'sticky');
+    if (sticky === 'primary' && !reclassify && !classifyForGemini) return resolve('primary', 'sticky');
     if (humanText === undefined) {
+      if (stored === 'gemini') return primary('sticky');
       return sticky ? resolve(sticky, 'sticky') : primary('passthrough:no-session-state');
     }
 
@@ -172,6 +184,41 @@ export class Router {
     // The risk veto runs inside selectTier, before any bar: no quota level moves a risky turn.
     const proposed = selectTier(distribution, policy);
     const extra = { distribution, classifierMs };
+
+    let isGeminiEligible = false;
+    if (this.options.geminiPolicy && !hasImageDocumentOrToolChoice(ctx.body)) {
+      const effectiveProposedForGemini = classifyForGemini ? 'primary' : proposed;
+      isGeminiEligible = geminiEligible(distribution, effectiveProposedForGemini, this.options.geminiPolicy, level);
+    }
+
+    if (isGeminiEligible) {
+      let nextStored: Tier;
+      if (fresh || stored === 'gemini') {
+        nextStored = 'gemini';
+      } else if (stored === 'primary') {
+        nextStored = 'primary';
+      } else {
+        nextStored = stickyTier(sticky!, proposed);
+      }
+      this.sessions.set(key, nextStored);
+
+      const gp = this.options.geminiPolicy!;
+      const barLowered = level !== 'none' && gp.pressureMinTextOnly < gp.minTextOnly;
+      const isPressure = barLowered && distribution.textOnly! < gp.minTextOnly;
+      return {
+        ...extra,
+        route: 'gemini',
+        tier: 'gemini',
+        fallbackTier: nextStored === 'gemini' ? 'primary' : nextStored,
+        reason: isPressure ? 'gemini:text-only:pressure' : 'gemini:text-only',
+        conversationKey: key,
+      };
+    }
+
+    if (classifyForGemini) {
+      return resolve('primary', 'sticky', extra);
+    }
+
     if (reclassify) return resolve(proposed, proposed === 'primary' ? 'sticky' : 'quota:reclassified', extra);
     if (!sticky) {
       const lowered = policy !== this.options.policy && TIER_RANK[proposed] < TIER_RANK[selectTier(distribution, this.options.policy)];

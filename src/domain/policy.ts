@@ -5,14 +5,14 @@ import type { ComplexityDistribution } from './complexity.js';
  *   cheap   — an OpenAI-compatible provider (Groq, OpenRouter, …), billed per token
  *   primary — Anthropic, the quota reserved for heavy lifting
  */
-export type Route = 'cheap' | 'primary';
+export type Route = 'cheap' | 'gemini' | 'primary';
 
 /**
  * Which model serves a conversation. `trivial` and `standard` are both the
  * cheap route (same OpenAI-compatible provider, different model); `primary`
  * is Anthropic. Ordered: a conversation's tier only moves up.
  */
-export type Tier = 'trivial' | 'standard' | 'primary';
+export type Tier = 'trivial' | 'standard' | 'gemini' | 'primary';
 
 export interface PolicyOptions {
   /** Minimum P(simple) for the trivial tier (the small cheap model). */
@@ -51,9 +51,9 @@ export function selectRoute(d: ComplexityDistribution & { readonly risk?: number
   return tierRoute(selectTier(d, options));
 }
 
-export const tierRoute = (tier: Tier): Route => (tier === 'primary' ? 'primary' : 'cheap');
+export const tierRoute = (tier: Tier): Route => (tier === 'primary' ? 'primary' : tier === 'gemini' ? 'gemini' : 'cheap');
 
-const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, primary: 2 };
+const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, gemini: 2, primary: 3 };
 
 /**
  * Escalate-only, across tiers: trivial → standard → primary. Bouncing down
@@ -79,4 +79,25 @@ const MAX_CHEAP_RISK = 0.5;
  */
 export function stickyRoute(current: Route, proposed: Route): Route {
   return current === 'primary' || proposed === 'primary' ? 'primary' : 'cheap';
+}
+
+export interface GeminiPolicyOptions {
+  readonly enabled: boolean;
+  readonly minTextOnly: number;
+  readonly pressureMinTextOnly: number;
+}
+
+export function geminiEligible(
+  d: ComplexityDistribution & { readonly risk?: number; readonly textOnly?: number },
+  proposedTier: Tier,
+  opts: GeminiPolicyOptions,
+  quotaLevel: 'none' | 'pressure' | 'critical'
+): boolean {
+  if (!opts.enabled) return false;
+  if (proposedTier !== 'primary') return false;
+  if ((d.risk ?? 0) >= MAX_CHEAP_RISK) return false;
+  if (d.textOnly === undefined) return false;
+  
+  const bar = quotaLevel !== 'none' ? Math.min(opts.minTextOnly, opts.pressureMinTextOnly) : opts.minTextOnly;
+  return d.textOnly >= bar;
 }

@@ -17,6 +17,10 @@ import { openTelemetryDb } from './telemetry/db.js';
 import { recordQuota } from './telemetry/schema.js';
 import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/recorder.js';
 
+import { ensureAgyHome } from './providers/gemini/isolation.js';
+import { GeminiCliProvider } from './providers/gemini/provider.js';
+import { CircuitBreaker } from './providers/gemini/breaker.js';
+
 // ponytail: fixed cap, one entry per live conversation. An evicted cheap
 // conversation is treated as unknown and goes primary: savings lost, never
 // correctness. Raise it only if `stats` shows that under heavy parallel use.
@@ -31,12 +35,23 @@ const inputBudget = (contextTokens: number, maxOutputTokens: number) => Math.flo
  * reports it over IPC; otherwise it owns HOST:PORT itself.
  */
 export async function serve(config: Config, { worker = false } = {}): Promise<void> {
+  let geminiConfig = config.gemini;
+  if (geminiConfig) {
+    try {
+      await ensureAgyHome(geminiConfig.home);
+    } catch (err) {
+      console.warn(`Failed to initialize Gemini tier isolation (ensureAgyHome): ${err instanceof Error ? err.message : String(err)}. Gemini tier disabled.`);
+      geminiConfig = undefined;
+    }
+  }
+
   const classifier: ComplexityClassifier =
     config.classifier.kind === 'jev'
       ? new JevClassifier({
           apiUrl: config.classifier.apiUrl,
           apiKey: config.classifier.apiKey,
           model: config.classifier.model,
+          geminiEnabled: geminiConfig !== undefined,
         })
       : new HeuristicClassifier();
 
@@ -85,8 +100,22 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
             },
           }
         : {}),
+      ...(geminiConfig
+        ? {
+            geminiPolicy: {
+              enabled: true,
+              minTextOnly: geminiConfig.minTextOnly,
+              pressureMinTextOnly: geminiConfig.pressureMinTextOnly,
+            },
+            geminiFromPrimary: geminiConfig.fromPrimary,
+          }
+        : {}),
     },
   );
+
+  const geminiBreaker = geminiConfig
+    ? new CircuitBreaker(geminiConfig.breakerFailures, geminiConfig.breakerCooldownMs, geminiConfig.maxConcurrency)
+    : undefined;
 
   const providers = {
     primary: new AnthropicProvider(config.primary),
@@ -94,6 +123,9 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
     // Same endpoint and key, bigger model: the health check covers both tiers.
     ...(config.cheapStandard
       ? { standard: new OpenAICompatibleProvider({ ...config.cheap, model: config.cheapStandard.model }) }
+      : {}),
+    ...(geminiConfig
+      ? { gemini: new GeminiCliProvider(geminiConfig) }
       : {}),
   };
 
@@ -115,6 +147,7 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
     ...(cheapHealth ? { cheapHealth } : {}),
     ...(build ? { build } : {}),
     ...(quota ? { quota } : {}),
+    ...(geminiBreaker ? { geminiBreaker } : {}),
   });
   logTelemetryError = (err) => app.log.error({ err }, 'telemetry write failed');
   logCheapState = (state) => app.log[state === 'down' ? 'warn' : 'info']({ cheap: state }, 'cheap provider health changed');
@@ -140,6 +173,7 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
       primary: config.primary.baseUrl,
       cheap: `${config.cheap.baseUrl} (${config.cheap.model})`,
       standard: config.cheapStandard?.model ?? 'off',
+      gemini: geminiConfig ? geminiConfig.model : 'off',
       telemetry: config.telemetry.dbPath ?? 'disabled',
     },
     'jev-router ready',

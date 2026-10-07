@@ -18,7 +18,7 @@ export interface ServerDeps {
   readonly config: Config;
   readonly router: Router;
   /** `standard` serves the standard tier; without it that tier falls back to `cheap`. */
-  readonly providers: Readonly<Record<Route, Provider>> & { readonly standard?: Provider };
+  readonly providers: Readonly<Record<'cheap' | 'primary', Provider>> & { readonly standard?: Provider | undefined; readonly gemini?: Provider | undefined };
   readonly telemetry?: TelemetrySink;
   /** Live cheap-provider health; absent = never checked ('unknown'). */
   readonly cheapHealth?: { readonly state: CheapState };
@@ -26,6 +26,7 @@ export interface ServerDeps {
   readonly build?: BuildInfo;
   /** Fed from every Anthropic response's rate-limit headers; absent = quota routing off. */
   readonly quota?: QuotaStore;
+  readonly geminiBreaker?: import('../providers/gemini/breaker.js').CircuitBreaker;
 }
 
 /** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
@@ -49,6 +50,7 @@ export function buildServer({
   cheapHealth,
   build,
   quota,
+  geminiBreaker,
 }: ServerDeps): FastifyInstance {
   const startedAt = new Date().toISOString();
 
@@ -88,6 +90,7 @@ export function buildServer({
     pid: process.pid,
     cheap: cheapHealth?.state ?? 'unknown',
     quota: quota?.current() ? { ...quota.current(), level: quota.level() } : null,
+    gemini: config.gemini ? { model: config.gemini.model, breaker: geminiBreaker?.state, inFlight: geminiBreaker?.inFlight } : null,
   }));
   app.post('/v1/messages', handleMessages);
   // count_tokens, /v1/models, HEAD /api/hello, … are Anthropic concerns: pass through.
@@ -117,11 +120,44 @@ export function buildServer({
       startedAtMs,
       humanText: latestHumanText(base.body!),
       requestClass: single(req.headers, 'x-claude-code-request-class'),
-      model: route === 'primary' ? base.body!.model : cheapModel,
+      model: route === 'primary' ? base.body!.model : (route === 'gemini' ? config.gemini?.model : cheapModel),
       requestedModel: base.body!.model,
       toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
       quotaUtilization: quota?.current()?.utilization,
     });
+
+    if (decision.route === 'gemini') {
+      const fallbackRoute = (decision.fallbackTier === 'trivial' || decision.fallbackTier === 'standard') ? 'cheap' : 'primary';
+      const fallbackProvider = fallbackRoute === 'cheap' ? cheapProvider : providers.primary;
+      const doFallback = async (reason: import('../routing/router.js').RouteReason) => {
+        const routeDec: RouteDecision = { ...decision, route: fallbackRoute, reason };
+        return relay(reply, await fallbackProvider.send(base), routeDec, req, exchange(fallbackRoute));
+      };
+
+      if (!providers.gemini || !geminiBreaker || geminiBreaker.state === 'open') {
+        return doFallback('skipped:gemini-unhealthy');
+      }
+
+      if (!geminiBreaker.acquire()) {
+        return doFallback('skipped:gemini-busy');
+      }
+
+      const res = await providers.gemini.send(base);
+      if (res.kind === 'response') {
+        geminiBreaker.release(true);
+        return relay(reply, res, decision, req, exchange('gemini'));
+      }
+
+      const isRoutingMiss = res.reason === 'model asked for tools' || res.reason.startsWith('tool attempt:');
+      if (!isRoutingMiss && res.reason !== 'aborted') {
+        geminiBreaker.release(false);
+      } else {
+        geminiBreaker.release(true);
+      }
+
+      req.log.warn({ reason: res.reason, conversation: decision.conversationKey }, 'gemini provider unavailable');
+      return doFallback('failover:gemini-unavailable');
+    }
 
     // A provider known to be down costs a failed attempt per turn: skip it, and do not
     // pin the conversation, so it returns to cheap once the provider is back.

@@ -20,6 +20,7 @@ export const MessagesBody = z.looseObject({
   thinking: z.looseObject({ type: z.string() }).optional(),
   output_config: z.record(z.string(), z.unknown()).optional(),
   speed: z.string().optional(),
+  tool_choice: z.looseObject({ type: z.string() }).optional(),
 });
 
 export type MessagesBody = z.infer<typeof MessagesBody>;
@@ -81,4 +82,16 @@ export function conversationFingerprint(body: MessagesBody): string {
  */
 export function estimateInputTokens(rawByteLength: number): number {
   return Math.ceil(rawByteLength / 3);
+}
+
+export function hasImageDocumentOrToolChoice(body: MessagesBody): boolean {
+  if (body.tool_choice?.type === 'any' || body.tool_choice?.type === 'tool') {
+    return true;
+  }
+  const last = turns(body).at(-1);
+  if (!last || last.role !== 'user') return false;
+  if (Array.isArray(last.content)) {
+    return last.content.some((b) => b.type === 'image' || b.type === 'document');
+  }
+  return false;
 }

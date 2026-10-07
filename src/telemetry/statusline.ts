@@ -110,7 +110,7 @@ export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, 
   if (staleBuild) parts.push('⚠ build velho');
   if (cheapDown) parts.push('cheap ✗');
   if (last) {
-    const where = last.provider === 'openai' ? 'cheap' : 'claude';
+    const where = last.provider === 'openai' ? 'cheap' : last.provider === 'gemini' ? 'gemini' : 'claude';
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
     parts.push(`last: ${where} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
   }
