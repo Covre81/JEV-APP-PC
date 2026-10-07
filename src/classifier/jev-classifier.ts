@@ -33,6 +33,13 @@ export const RISK_QUESTIONS = {
     type: 'noul',
     instructions: 'The request deletes data or files, runs a database migration, or acts on a production system.',
   },
+  // The cheap model answered "is everything ok here?" without checking anything and
+  // invented a diff summary: questions about the repository's state need its tools.
+  requires_inspection: {
+    type: 'noul',
+    instructions:
+      "The request asks for a verdict or a report about the project's current state (whether things are ok, what changed, what is wrong, where things stand) that can only be given after investigating several files, diffs, git history or logs, and the request itself does not contain those facts (e.g. 'is everything ok here?', 'summarize what changed in the statusline'). A request to make a specific edit, run a named command, or explain code or text included in the request is NOT this.",
+  },
 } as const;
 
 /** Risk answers are a safety gate: required, so a missing one fails the call toward primary. */

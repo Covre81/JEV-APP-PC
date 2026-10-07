@@ -66,6 +66,18 @@ only on work that needs Claude**.
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
    `auxiliary` class includes the auto-mode safety classifier, and compaction
    summaries need the strong model.
+7. **Risk vetoes the cheap route, always.** The same JEV call asks three
+   yes/no Nouls; if any is ≥ 0.5 the turn stays on Anthropic, however simple
+   it looks:
+   - `security_sensitive`: auth, password hashing, tokens, crypto, secrets;
+   - `destructive_or_production`: deletes data, migrations, production;
+   - `requires_inspection`: a verdict or report on the project's state
+     ("is everything ok here?", "summarize what changed") that needs the
+     repository investigated first. The 20B answered both of those without
+     looking. Edits, named commands and explaining pasted code are excluded.
+   A response missing any of the three fails toward Anthropic.
+   `jev-router stats` counts cheap answers that called none of the tools
+   they were offered (**inspection miss**): the misroutes the veto missed.
 
 **Consequences.**
 

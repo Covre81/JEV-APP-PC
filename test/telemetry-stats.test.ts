@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { inTransaction, openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
-import type { NewRouterLog } from '../src/telemetry/schema.js';
+import { MIGRATIONS, type NewRouterLog } from '../src/telemetry/schema.js';
 import { pricingFromEnv } from '../src/telemetry/pricing.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
 
@@ -56,6 +60,45 @@ describe('telemetry → stats', () => {
     assert.match(text, /NET \((PROFIT|LOSS)\)/);
     assert.match(text, /Cheap provider priced at \$0/);
     await sink.close();
+  });
+
+  it('counts cheap answers that ignored the tools they were offered (inspection miss)', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 0, inspectionMiss: true }));
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 2, inspectionMiss: false }));
+    sink.record(row({ finalProvider: 'anthropic', toolsOffered: 20, toolCalls: 0 }));
+    sink.flush();
+
+    const stats = computeStats(db);
+    assert.equal(stats.inspectionMisses, 1);
+    assert.match(renderStats(stats), /Cheap answers without tool use \(inspection miss\)\s+1/);
+    const stored = db.prepare('SELECT tools_offered, tool_calls, inspection_miss FROM router_logs ORDER BY id').all();
+    assert.deepEqual(
+      stored.map((r) => ({ ...r })),
+      [
+        { tools_offered: 20, tool_calls: 0, inspection_miss: 1 },
+        { tools_offered: 20, tool_calls: 2, inspection_miss: 0 },
+        { tools_offered: 20, tool_calls: 0, inspection_miss: null },
+      ],
+    );
+    await sink.close();
+  });
+
+  it('migrates a database written by the previous build without losing rows', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jev-migrate-'));
+    const file = join(dir, 'telemetry.db');
+    const old = new DatabaseSync(file);
+    for (const sql of MIGRATIONS.slice(0, 2)) old.exec(sql);
+    old.exec('PRAGMA user_version = 2');
+    old.exec(`INSERT INTO router_logs (final_provider, route_reason, outcome, latency_ms) VALUES ('openai', 'classified', 'ok', 5)`);
+    old.close();
+
+    const db = openTelemetryDb(file);
+    assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, MIGRATIONS.length);
+    assert.deepEqual({ ...db.prepare('SELECT tool_calls, inspection_miss FROM router_logs').get() }, { tool_calls: null, inspection_miss: null });
+    assert.equal(computeStats(db).inspectionMisses, 0);
+    db.close();
   });
 
   it('keeps rows queued when a write fails and retries on the next flush', async () => {

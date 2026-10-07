@@ -55,6 +55,48 @@ describe('meterAnthropicBody', () => {
     assert.equal(m.usage(), undefined);
   });
 
+  it('counts the tool calls of an SSE response, even with "tool_use" split across chunks', async () => {
+    const body = Buffer.from(
+      [
+        'event: message_start',
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":"tool_use is a word"}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Read","input":{}}}',
+        '',
+        'event: content_block_start',
+        'data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"t2","name":"Bash","input":{}}}',
+        '',
+        '',
+      ].join('\n'),
+    );
+    const m = meterAnthropicBody(chunked(body, 5), 'text/event-stream', undefined);
+    await collect(m.body);
+    await m.settled;
+    assert.equal(m.toolCalls(), 2);
+  });
+
+  it('counts the tool calls of a JSON response, and zero for a text-only answer', async () => {
+    const withTools = Buffer.from(
+      JSON.stringify({
+        content: [{ type: 'text', text: 'checking' }, { type: 'tool_use', id: 't1', name: 'Read', input: {} }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    );
+    const m = meterAnthropicBody(Readable.from([withTools]), 'application/json', undefined);
+    await collect(m.body);
+    await m.settled;
+    assert.equal(m.toolCalls(), 1);
+
+    const textOnly = meterAnthropicBody(chunked(sse), 'text/event-stream', undefined);
+    await collect(textOnly.body);
+    await textOnly.settled;
+    assert.equal(textOnly.toolCalls(), 0);
+  });
+
   it('never breaks the relay on garbage', async () => {
     const junk = Buffer.from('{not json');
     const m = meterAnthropicBody(Readable.from([junk]), 'application/json', 'gzip');

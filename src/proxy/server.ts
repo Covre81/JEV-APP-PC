@@ -103,6 +103,7 @@ export function buildServer({
       requestClass: single(req.headers, 'x-claude-code-request-class'),
       model: route === 'cheap' ? config.cheap.model : base.body!.model,
       requestedModel: base.body!.model,
+      toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
     });
 
     // A provider known to be down costs a failed attempt per turn: skip it, and do not

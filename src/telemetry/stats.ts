@@ -24,6 +24,8 @@ export interface RouterStats {
   readonly fallbacks: number;
   /** Cheap provider broke mid-stream; Claude Code retries, the conversation is pinned to Anthropic. */
   readonly cheapStreamErrors: number;
+  /** Cheap answers, delivered ok, that called none of the tools offered: likely made up without looking. */
+  readonly inspectionMisses: number;
   /** Human prompts sent more than once (same sha256), and the extra sends. */
   readonly repeatedPrompts: number;
   readonly repeatedSends: number;
@@ -91,6 +93,10 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     `SELECT count(*) AS n FROM router_logs ${inWindow} AND final_provider = 'openai' AND outcome = 'stream_error'`,
   ).n;
 
+  const inspectionMisses = get<{ n: number }>(
+    `SELECT coalesce(sum(inspection_miss), 0) AS n FROM router_logs ${inWindow}`,
+  ).n;
+
   const repeats = all<{ sends: number }>(`
     SELECT count(*) AS sends FROM router_logs ${inWindow} AND human_prompt_hash IS NOT NULL
     GROUP BY human_prompt_hash HAVING count(*) > 1`);
@@ -113,6 +119,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     classified: summary.classified,
     fallbacks: summary.fallbacks,
     cheapStreamErrors,
+    inspectionMisses,
     repeatedPrompts: repeats.length,
     repeatedSends: repeats.reduce((n, r) => n + r.sends - 1, 0),
     estimatedTokensSaved: summary.saved,
@@ -153,6 +160,7 @@ export function renderStats(s: RouterStats): string {
     ['Diverted from Anthropic (cheap route)', `${fmt(o.requests)} (${pct(o.requests, s.total)})`],
     ['  served OK by cheap provider', fmt(o.ok)],
     ['  cheap stream errors (retried on Anthropic)', fmt(s.cheapStreamErrors)],
+    ['Cheap answers without tool use (inspection miss)', fmt(s.inspectionMisses)],
     ['Fallbacks cheap → Anthropic', fmt(s.fallbacks)],
     ['Scored by JEV', fmt(s.classified)],
     ['Repeated prompts (extra sends)', `${fmt(s.repeatedPrompts)} (${fmt(s.repeatedSends)})`],

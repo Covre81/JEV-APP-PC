@@ -49,6 +49,10 @@ const CASES: readonly (readonly [Label, string])[] = [
   ['standard', 'implementa o endpoint POST /orders com validação zod e teste'],
   ['standard', 'esse erro aparece quando abro o app:\nTypeError: Cannot read properties of undefined (reading \'map\')\n    at QuestionList (QuestionList.tsx:42:18)\n    at renderWithHooks (react-dom.development.js:14985:18)\n    corrige'],
   ['standard', 'add retry with exponential backoff to the TTS client in faceless-tools'],
+  // Short, but only the repository can answer them: the cheap model replied without
+  // looking (2026-10-06). Labeled standard so a cheap route counts as false cheap.
+  ['standard', 'tá tudo certo por aqui?'],
+  ['standard', 'resume o que mudou na statusline nos últimos commits'],
   ['structural', 'refatora o módulo de pagamentos pra Clean Architecture, separando domínio, casos de uso e adapters'],
   ['structural', 'tem uma race condition no cache de sessões quando duas requisições chegam juntas. acha a causa raiz'],
   ['structural', 'migra o banco de Room 3 pra 4 sem perder os dados dos usuários'],

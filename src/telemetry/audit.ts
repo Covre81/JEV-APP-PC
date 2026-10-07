@@ -14,6 +14,8 @@ export interface ExchangeContext {
   readonly requestClass: string | undefined;
   readonly model: string | undefined;
   readonly requestedModel: string | undefined;
+  /** Size of `body.tools`: a cheap answer that used none of them is an inspection miss. */
+  readonly toolsOffered: number;
 }
 
 export interface UpstreamOutcome {
@@ -89,7 +91,13 @@ export function auditExchange(
             : metered.sawErrorEvent()
               ? 'stream_error'
               : 'ok';
-        record(sink, decision, ctx, { status: upstream.status, outcome, latencyMs, usage: metered.usage() });
+        record(sink, decision, ctx, {
+          status: upstream.status,
+          outcome,
+          latencyMs,
+          usage: metered.usage(),
+          toolCalls: metered.toolCalls(),
+        });
       } catch (err) {
         onError(err);
       }
@@ -105,6 +113,7 @@ export function auditFailure(sink: TelemetrySink, decision: RouteDecision, ctx: 
     outcome: 'proxy_error',
     latencyMs: Math.round(performance.now() - ctx.startedAt),
     usage: undefined,
+    toolCalls: null,
   });
 }
 
@@ -117,14 +126,16 @@ function record(
     outcome: Outcome;
     latencyMs: number;
     usage: ReturnType<MeteredBody['usage']>;
+    toolCalls: number | null;
   },
 ): void {
+  const cheap = decision.route === 'cheap';
   sink.record({
     createdAt: new Date(ctx.startedAtMs),
     sessionId: decision.conversationKey ?? null,
     humanPromptHash: promptHash(ctx.humanText),
     jevDecision: jevDecisionOf(decision),
-    finalProvider: decision.route === 'cheap' ? 'openai' : 'anthropic',
+    finalProvider: cheap ? 'openai' : 'anthropic',
     model: ctx.model ?? null,
     requestedModel: ctx.requestedModel ?? null,
     routeReason: decision.reason,
@@ -137,5 +148,8 @@ function record(
     cacheWriteTokens: result.usage?.cacheWriteTokens ?? null,
     latencyMs: result.latencyMs,
     fallbackTriggered: decision.reason === 'failover:cheap-unavailable',
+    toolsOffered: ctx.toolsOffered,
+    toolCalls: result.toolCalls,
+    inspectionMiss: cheap ? result.outcome === 'ok' && ctx.toolsOffered > 0 && result.toolCalls === 0 : null,
   });
 }

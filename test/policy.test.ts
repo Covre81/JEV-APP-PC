@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { parseJevRisk } from '../src/classifier/jev-classifier.js';
 import { toDistribution } from '../src/domain/complexity.js';
 import { selectRoute, stickyRoute } from '../src/domain/policy.js';
 
@@ -31,6 +32,19 @@ describe('selectRoute risk veto', () => {
     assert.equal(selectRoute({ ...d, risk: 0.94 }, options), 'primary');
     assert.equal(selectRoute({ ...d, risk: 0.15 }, options), 'cheap');
     assert.equal(selectRoute(d, options), 'cheap');
+  });
+
+  it('vetoes a simple-looking question that needs the repository to answer ("is everything ok here?")', () => {
+    const answer = (inspection: number) => ({
+      answers: {
+        security_sensitive: { noul: 0.02 },
+        destructive_or_production: { noul: 0.03 },
+        requires_inspection: { noul: inspection },
+      },
+    });
+    const d = { simple: 0.91, standard: 0.07, structural: 0.02 };
+    assert.equal(selectRoute({ ...d, risk: parseJevRisk(answer(0.88)) }, options), 'primary');
+    assert.equal(selectRoute({ ...d, risk: parseJevRisk(answer(0.1)) }, options), 'cheap', 'the facts are in the prompt');
   });
 });
 

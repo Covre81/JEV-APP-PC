@@ -58,6 +58,16 @@ export interface RouterLog {
   readonly latencyMs: number;
   /** The cheap provider failed before answering and the request fell back to Anthropic. */
   readonly fallbackTriggered: boolean;
+  /** Tools the client offered (`body.tools`); null on rows written before it was recorded. */
+  readonly toolsOffered: number | null;
+  /** `tool_use` blocks in the response. */
+  readonly toolCalls: number | null;
+  /**
+   * Cheap-route answer, delivered ok, that called none of the tools it was
+   * offered: the misroute signal ("is everything ok here?" answered without
+   * looking). Null on Anthropic rows, where it says nothing.
+   */
+  readonly inspectionMiss: boolean | null;
 }
 
 export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
@@ -88,16 +98,19 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX router_logs_prompt_hash_idx ON router_logs (human_prompt_hash);`,
   `ALTER TABLE router_logs ADD requested_model text;
   ALTER TABLE router_logs ADD cache_write_tokens integer;`,
+  `ALTER TABLE router_logs ADD tools_offered integer;
+  ALTER TABLE router_logs ADD tool_calls integer;
+  ALTER TABLE router_logs ADD inspection_miss integer;`,
 ];
 
 export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
   created_at, session_id, human_prompt_hash, jev_decision, final_provider, model, requested_model, route_reason,
   request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
-  fallback_triggered
+  fallback_triggered, tools_offered, tool_calls, inspection_miss
 ) VALUES (
   @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
   @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
-  @fallbackTriggered
+  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss
 )`;
 
 /** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
@@ -119,4 +132,7 @@ export const insertParams = (r: NewRouterLog) => ({
   cacheWriteTokens: r.cacheWriteTokens ?? null,
   latencyMs: r.latencyMs,
   fallbackTriggered: r.fallbackTriggered ? 1 : 0,
+  toolsOffered: r.toolsOffered ?? null,
+  toolCalls: r.toolCalls ?? null,
+  inspectionMiss: r.inspectionMiss == null ? null : r.inspectionMiss ? 1 : 0,
 });

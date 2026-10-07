@@ -19,6 +19,8 @@ export interface MeteredBody {
   usage(): Usage | undefined;
   /** True if the stream carried an Anthropic `error` event. */
   sawErrorEvent(): boolean;
+  /** `tool_use` blocks in the response; final once the body has ended. */
+  toolCalls(): number;
   /** Resolves once metering is over (body fully parsed, or abandoned). Never rejects. */
   readonly settled: Promise<void>;
 }
@@ -49,6 +51,8 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   let cacheWrite = 0;
   let errorEvent = false;
   let seen = false;
+  let toolCalls = 0;
+  const onToolUse = () => void toolCalls++;
 
   const absorb = (u: UsageFields | undefined) => {
     if (!u || typeof u !== 'object') return;
@@ -63,7 +67,9 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   let settle!: () => void;
   const settled = new Promise<void>((resolve) => (settle = resolve));
 
-  const sink = contentType.includes('text/event-stream') ? sseSink(absorb, () => (errorEvent = true)) : jsonSink(absorb);
+  const sink = contentType.includes('text/event-stream')
+    ? sseSink(absorb, () => (errorEvent = true), onToolUse)
+    : jsonSink(absorb, onToolUse);
   const decoder = decompressor(contentEncoding);
   let broken = false;
   const finish = () => {
@@ -126,6 +132,7 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
           }
         : undefined,
     sawErrorEvent: () => errorEvent,
+    toolCalls: () => toolCalls,
     settled,
   };
 }
@@ -149,15 +156,20 @@ function decompressor(encoding: string | undefined): Gunzip | Transform | undefi
   }
 }
 
-/** Line-oriented SSE scan: only `data:` lines that can carry usage or an error are JSON-parsed. */
-function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void): Sink {
+/** Line-oriented SSE scan: only `data:` lines that can carry usage, an error or a tool call are JSON-parsed. */
+function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void, onToolUse: () => void): Sink {
   const text = new StringDecoder('utf8');
   let pending = '';
   const line = (raw: string) => {
     if (!raw.startsWith('data:')) return;
     const data = raw.slice(5).trim();
-    if (!data.includes('"usage"') && !data.includes('"error"')) return;
-    let event: { type?: unknown; usage?: UsageFields; message?: { usage?: UsageFields } };
+    if (!data.includes('"usage"') && !data.includes('"error"') && !data.includes('"tool_use"')) return;
+    let event: {
+      type?: unknown;
+      usage?: UsageFields;
+      message?: { usage?: UsageFields };
+      content_block?: { type?: unknown };
+    };
     try {
       event = JSON.parse(data);
     } catch {
@@ -166,6 +178,7 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
     if (event.type === 'message_start') absorb(event.message?.usage);
     else if (event.type === 'message_delta') absorb(event.usage);
     else if (event.type === 'error') onError();
+    else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') onToolUse();
   };
   const scan = (chunk: string) => {
     pending += chunk;
@@ -185,7 +198,7 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
   };
 }
 
-function jsonSink(absorb: (u: UsageFields | undefined) => void): Sink {
+function jsonSink(absorb: (u: UsageFields | undefined) => void, onToolUse: () => void): Sink {
   const parts: Buffer[] = [];
   let size = 0;
   return {
@@ -195,8 +208,11 @@ function jsonSink(absorb: (u: UsageFields | undefined) => void): Sink {
       parts.push(chunk);
     },
     end: () => {
-      const parsed = JSON.parse(Buffer.concat(parts).toString('utf8')) as { usage?: UsageFields };
+      const parsed = JSON.parse(Buffer.concat(parts).toString('utf8')) as { usage?: UsageFields; content?: unknown };
       absorb(parsed.usage);
+      if (Array.isArray(parsed.content)) {
+        for (const block of parsed.content) if ((block as { type?: unknown } | null)?.type === 'tool_use') onToolUse();
+      }
     },
   };
 }

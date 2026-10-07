@@ -288,6 +288,9 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
           cacheWriteTokens: r.cache_write_tokens,
           latencyMs: r.latency_ms,
           fallbackTriggered: r.fallback_triggered === 1,
+          toolsOffered: r.tools_offered,
+          toolCalls: r.tool_calls,
+          inspectionMiss: r.inspection_miss === null ? null : r.inspection_miss === 1,
         }),
       );
       if (rows.length > 0) return rows;
@@ -311,6 +314,9 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.match(cheapRow.humanPromptHash ?? '', /^[0-9a-f]{64}$/);
     assert.ok(cheapRow.jevDecision && cheapRow.jevDecision.pSimple >= 0.8);
     assert.ok(cheapRow.latencyMs >= 150, 'latency covers the whole stream');
+    assert.equal(cheapRow.toolsOffered, 0);
+    assert.equal(cheapRow.toolCalls, 0);
+    assert.equal(cheapRow.inspectionMiss, false, 'no tools offered: answering in text is not a miss');
 
     const [primaryRow] = await logsFor('T-primary');
     assert.ok(primaryRow);
@@ -321,6 +327,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(primaryRow.cacheWriteTokens, 0);
     assert.equal(primaryRow.tokensOut, 25);
     assert.equal(primaryRow.httpStatus, 200);
+    assert.equal(primaryRow.inspectionMiss, null, 'only cheap answers are judged');
   });
 
   it('flags the fallback when the cheap provider fails and Anthropic answers', async () => {
