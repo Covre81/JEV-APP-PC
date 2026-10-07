@@ -42,6 +42,19 @@ describe('supervisor settings', () => {
   });
 });
 
+describe('quota routing settings', () => {
+  it('is on by default, with the 429/529 failover', () => {
+    const config = loadConfig(base);
+    assert.deepEqual(config.quota, { enabled: true, pressure: 0.8, critical: 0.95, minCheapProbability: 0.7, minStandardProbability: 0.6 });
+    assert.equal(config.router.failoverOnPrimaryRateLimit, true);
+    assert.equal(loadConfig({ ...base, QUOTA_ROUTING: 'false' }).quota.enabled, false);
+  });
+
+  it('refuses a critical level below the pressure level', () => {
+    assert.throws(() => loadConfig({ ...base, QUOTA_PRESSURE: '0.9', QUOTA_CRITICAL: '0.8' }), /QUOTA_CRITICAL/);
+  });
+});
+
 describe('removedEnvSet', () => {
   it('lists env vars that no longer exist but are still set', () => {
     assert.deepEqual(removedEnvSet({ ROUTER_ALLOW_ESCALATION: 'false', HOST: '127.0.0.1' }), ['ROUTER_ALLOW_ESCALATION']);

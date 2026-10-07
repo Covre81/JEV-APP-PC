@@ -117,6 +117,11 @@ describe('statusline', () => {
     }
   });
 
+  it('shows the binding Claude quota window, with a warning from 80% on', () => {
+    assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.42, window: '5h' } }), 'jev-router ✓ · cota 42% 5h');
+    assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.82, window: '5h' } }), 'jev-router ✓ · ⚠ cota 82% 5h');
+  });
+
   it('flags a last turn that did not end ok', () => {
     assert.equal(
       renderStatusLine({ healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error', pSimple: 0.9 } }),

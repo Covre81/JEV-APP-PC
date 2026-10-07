@@ -52,7 +52,10 @@ only on work that needs Claude**.
    - A new human turn on a cheap tier is re-classified and may escalate
      (`escalated:standard`, `escalated`).
    - Primary is terminal: going back down would throw away the Anthropic
-     cache, and the next escalation would pay to rebuild it.
+     cache, and the next escalation would pay to rebuild it. The one
+     exception is critical quota (rule 5).
+   - Compaction does not reopen the cheap route: a session on Claude stays
+     there after `/compact` (`pinned:compaction`).
    - Each tier has its own context budget (`CHEAP_CONTEXT_TOKENS`,
      `CHEAP_STANDARD_CONTEXT_TOKENS`); past it, the turn goes primary.
 4. **Failure only ever moves work up to Anthropic.**
@@ -65,11 +68,22 @@ only on work that needs Claude**.
      re-sends the turn as a non-streaming request). The pin does not cover a
      break on a conversation's first turn: that retry is re-classified.
    - JEV fails or times out: primary.
-5. **Quota failover in the other direction is opt-in**
-   (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`). When Anthropic answers 429 or 529,
-   the request is retried on the cheap provider. It's off by default because
-   it silently hands structural work to a 20B model. Turn it on only if you
-   prefer a degraded answer to waiting.
+5. **The Claude quota opens the cheap route when it runs low**
+   (`QUOTA_ROUTING=true`). Every Anthropic response carries the quota
+   (`anthropic-ratelimit-unified-5h-*`, `-7d-*`, …); the router keeps the
+   window closest to its limit.
+   - From `QUOTA_PRESSURE` (80%) on, the cheap bars drop to
+     `QUOTA_PRESSURE_MIN_CHEAP` (0.7) and `QUOTA_PRESSURE_MIN_STANDARD` (0.6)
+     for new turns and subagents (`quota:pressure`). Auxiliary traffic stays
+     on Claude.
+   - From `QUOTA_CRITICAL` (95%) on, a new human turn of a session pinned to
+     Claude is re-classified and may go cheap (`quota:reclassified`); it then
+     stays there, because going back would rebuild the Claude cache. The
+     next structural turn escalates as usual.
+   - When Anthropic answers 429 or 529, the request is retried on the cheap
+     provider (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`, now the default): a
+     degraded answer instead of a dead session.
+   - The risk veto (rule 7) is checked before any of this, at every level.
 6. **Some Claude Code traffic always stays primary**
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
    `auxiliary` class includes the auto-mode safety classifier, and compaction
@@ -116,6 +130,7 @@ src/
 ├── serve.ts                       # composition root (only file that knows concrete classes)
 ├── supervisor.ts                  # reverse proxy over a forked worker: reload without dropping sessions
 ├── build-info.ts                  # dist/build-info.json (sha + build time) for /healthz and the status line
+├── quota.ts                       # anthropic-ratelimit-* headers → binding quota window and level
 ├── statusline.ts                  # `jev-router statusline`: health probe + session's last route
 ├── config.ts                      # zod-validated env → typed Config; fails fast at boot
 ├── paths.ts                       # ~/.jev-router (or $JEV_ROUTER_HOME): .env + telemetry.db
@@ -270,7 +285,9 @@ the supervisor answers 503 and waits for a `reload`. A change to
 `supervisor.ts` itself also needs a restart.
 
 `/healthz` reports which build answers:
-`{ok, sha, builtAt, startedAt, pid, cheap}`, where `cheap` is the cheap
+`{ok, sha, builtAt, startedAt, pid, cheap, quota}`, where `quota` is the
+last Claude quota reading (`{utilization, window, level, …}`, or null before
+the first Anthropic response) and `cheap` is the cheap
 provider's health (`unknown | up | down`). The build stamps
 `dist/build-info.json` (`git rev-parse --short=12 HEAD` + time). For
 `npm run dev` (tsx watch), set `SUPERVISOR_ENABLED=false`.
@@ -356,7 +373,10 @@ It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
 `jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms.
 `⚠ build velho` means `dist/build-info.json` is newer than the build that
 answers `/healthz` (built but not reloaded: run `jev-router reload`);
-`cheap ✗` means the health check sees the cheap provider down. The
+`cheap ✗` means the health check sees the cheap provider down.
+`cota 82% 5h` is the binding Claude quota window as the router last saw it
+(`⚠` from 80%, where the cheap bars drop); readings older than 6 h are not
+shown. The
 reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
 asked (`sticky`, `auxiliary`, …). `today 12/40 cheap` counts today's routed
 turns, not requests: main-agent human turns plus every turn JEV scored

@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { inTransaction, openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
-import { MIGRATIONS, type NewRouterLog } from '../src/telemetry/schema.js';
+import { MIGRATIONS, recordQuota, type NewRouterLog } from '../src/telemetry/schema.js';
 import { pricingFromEnv } from '../src/telemetry/pricing.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
 
@@ -100,6 +100,24 @@ describe('telemetry → stats', () => {
       { model: 'gpt-oss:20b-cloud', requests: 1, ok: 1 },
     ]);
     assert.match(renderStats(stats), /gemma4:31b-cloud\s+2\s+1/);
+    await sink.close();
+  });
+
+  it('reports the last quota reading and the turns the quota sent cheap', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', routeReason: 'quota:pressure' }));
+    sink.record(row({ finalProvider: 'openai', routeReason: 'quota:reclassified' }));
+    sink.record(row({ finalProvider: 'openai', routeReason: 'failover:primary-rate-limited' }));
+    sink.record(row({ routeReason: 'sticky' }));
+    sink.flush();
+    recordQuota(db, { utilization: 0.83, window: '5h', observedAt: new Date('2026-10-07T12:00:00Z') });
+
+    const stats = computeStats(db);
+    assert.equal(stats.quotaRouted, 3);
+    assert.deepEqual(stats.lastQuota && { u: stats.lastQuota.utilization, w: stats.lastQuota.window }, { u: 0.83, w: '5h' });
+    assert.match(renderStats(stats), /Sent cheap by quota pressure\s+3/);
+    assert.match(renderStats(stats), /Claude quota \(last seen\)\s+83% 5h/);
     await sink.close();
   });
 

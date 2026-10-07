@@ -8,11 +8,13 @@ import type { Tier } from './domain/policy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { CheapHealth } from './providers/cheap-health.js';
 import { OpenAICompatibleProvider } from './providers/openai/provider.js';
+import { QuotaStore } from './quota.js';
 import { buildServer } from './proxy/server.js';
 import { Router } from './routing/router.js';
 import { TtlLruStore } from './routing/session-store.js';
 import { startSupervisor, type WorkerProcess } from './supervisor.js';
 import { openTelemetryDb } from './telemetry/db.js';
+import { recordQuota } from './telemetry/schema.js';
 import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/recorder.js';
 
 // ponytail: fixed cap, one entry per live conversation. An evicted cheap
@@ -38,6 +40,24 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
         })
       : new HeuristicClassifier();
 
+  // Errors surface through the server's logger, which exists only after buildServer.
+  let logTelemetryError: (err: unknown) => void = () => {};
+  let logCheapState: (state: string) => void = () => {};
+  const db = config.telemetry.dbPath ? openTelemetryDb(config.telemetry.dbPath) : undefined;
+  const telemetry: TelemetrySink = db ? new SqliteTelemetry(db, { onError: (err) => logTelemetryError(err) }) : noopTelemetry;
+
+  // Persisted on change only: the status line, another process, reads the latest row.
+  const quota = config.quota.enabled
+    ? new QuotaStore(config.quota, (snapshot) => {
+        if (!db) return;
+        try {
+          recordQuota(db, snapshot);
+        } catch (err) {
+          logTelemetryError(err);
+        }
+      })
+    : undefined;
+
   const router = new Router(
     classifier,
     new TtlLruStore<Tier>(SESSION_MAX_ENTRIES, config.router.sessionTtlMs),
@@ -56,6 +76,15 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
         : {}),
       classifierTimeoutMs: config.classifier.timeoutMs,
       classifierMaxChars: config.classifier.maxChars,
+      ...(quota
+        ? {
+            quota,
+            pressurePolicy: {
+              minCheapProbability: config.quota.minCheapProbability,
+              minStandardProbability: config.quota.minStandardProbability,
+            },
+          }
+        : {}),
     },
   );
 
@@ -68,12 +97,6 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
       : {}),
   };
 
-  // Errors surface through the server's logger, which exists only after buildServer.
-  let logTelemetryError: (err: unknown) => void = () => {};
-  let logCheapState: (state: string) => void = () => {};
-  const telemetry: TelemetrySink = config.telemetry.dbPath
-    ? new SqliteTelemetry(openTelemetryDb(config.telemetry.dbPath), { onError: (err) => logTelemetryError(err) })
-    : noopTelemetry;
   const cheapHealth = config.cheapHealth.enabled
     ? new CheapHealth({
         baseUrl: config.cheap.baseUrl,
@@ -84,7 +107,15 @@ export async function serve(config: Config, { worker = false } = {}): Promise<vo
     : undefined;
 
   const build = runningBuild();
-  const app = buildServer({ config, router, providers, telemetry, ...(cheapHealth ? { cheapHealth } : {}), ...(build ? { build } : {}) });
+  const app = buildServer({
+    config,
+    router,
+    providers,
+    telemetry,
+    ...(cheapHealth ? { cheapHealth } : {}),
+    ...(build ? { build } : {}),
+    ...(quota ? { quota } : {}),
+  });
   logTelemetryError = (err) => app.log.error({ err }, 'telemetry write failed');
   logCheapState = (state) => app.log[state === 'down' ? 'warn' : 'info']({ cheap: state }, 'cheap provider health changed');
   app.addHook('onClose', () => telemetry.close());

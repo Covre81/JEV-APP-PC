@@ -7,6 +7,7 @@ import type { Config } from '../config.js';
 import type { Route } from '../domain/policy.js';
 import type { CheapState } from '../providers/cheap-health.js';
 import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
+import type { QuotaStore } from '../quota.js';
 import { latestHumanText, parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
 import type { RouteDecision, Router } from '../routing/router.js';
 import { auditExchange, auditFailure, type ExchangeContext } from '../telemetry/audit.js';
@@ -23,6 +24,8 @@ export interface ServerDeps {
   readonly cheapHealth?: { readonly state: CheapState };
   /** The build this process runs; absent when running from src. */
   readonly build?: BuildInfo;
+  /** Fed from every Anthropic response's rate-limit headers; absent = quota routing off. */
+  readonly quota?: QuotaStore;
 }
 
 /** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
@@ -45,8 +48,16 @@ export function buildServer({
   telemetry = noopTelemetry,
   cheapHealth,
   build,
+  quota,
 }: ServerDeps): FastifyInstance {
   const startedAt = new Date().toISOString();
+
+  /** Every Anthropic answer carries the quota: read it on the way through, whatever the path. */
+  const sendPrimary = async (req: ProviderRequest): Promise<ProviderResult> => {
+    const result = await providers.primary.send(req);
+    if (result.kind === 'response') quota?.observe(result.headers);
+    return result;
+  };
   const app = Fastify({
     logger: { level: config.logLevel },
     bodyLimit: config.bodyLimitBytes,
@@ -76,17 +87,18 @@ export function buildServer({
     startedAt,
     pid: process.pid,
     cheap: cheapHealth?.state ?? 'unknown',
+    quota: quota?.current() ? { ...quota.current(), level: quota.level() } : null,
   }));
   app.post('/v1/messages', handleMessages);
   // count_tokens, /v1/models, HEAD /api/hello, … are Anthropic concerns: pass through.
-  app.all('*', async (req, reply) => relay(reply, await providers.primary.send(providerRequest(req, reply))));
+  app.all('*', async (req, reply) => relay(reply, await sendPrimary(providerRequest(req, reply))));
 
   async function handleMessages(req: FastifyRequest, reply: FastifyReply) {
     const startedAt = performance.now();
     const startedAtMs = Date.now();
     const base = providerRequest(req, reply);
     // Unparseable → let Anthropic return its canonical validation error.
-    if (!base.body || !base.rawBody) return relay(reply, await providers.primary.send(base));
+    if (!base.body || !base.rawBody) return relay(reply, await sendPrimary(base));
 
     const decision = await router.decide({
       body: base.body,
@@ -108,13 +120,14 @@ export function buildServer({
       model: route === 'primary' ? base.body!.model : cheapModel,
       requestedModel: base.body!.model,
       toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
+      quotaUtilization: quota?.current()?.utilization,
     });
 
     // A provider known to be down costs a failed attempt per turn: skip it, and do not
     // pin the conversation, so it returns to cheap once the provider is back.
     if (decision.route === 'cheap' && cheapHealth?.state === 'down') {
       const skipped: RouteDecision = { ...decision, route: 'primary', reason: 'skipped:cheap-unhealthy' };
-      return relay(reply, await providers.primary.send(base), skipped, req, exchange('primary'));
+      return relay(reply, await sendPrimary(base), skipped, req, exchange('primary'));
     }
 
     if (decision.route === 'cheap') {
@@ -124,10 +137,10 @@ export function buildServer({
       router.pinToPrimary(decision);
       const failover: RouteDecision = { ...decision, route: 'primary', reason: 'failover:cheap-unavailable' };
       req.log.warn({ reason: cheap.reason, conversation: decision.conversationKey }, 'cheap provider unavailable');
-      return relay(reply, await providers.primary.send(base), failover, req, exchange('primary'));
+      return relay(reply, await sendPrimary(base), failover, req, exchange('primary'));
     }
 
-    const primary = await providers.primary.send(base);
+    const primary = await sendPrimary(base);
     if (
       primary.kind === 'unavailable' ||
       !config.router.failoverOnPrimaryRateLimit ||

@@ -8,6 +8,7 @@ import {
   latestHumanText,
   type MessagesBody,
 } from './messages-body.js';
+import type { QuotaLevel } from '../quota.js';
 import type { TtlLruStore } from './session-store.js';
 
 export type RouteReason =
@@ -21,6 +22,9 @@ export type RouteReason =
   | 'escalated:context'
   | 'failover:cheap-unavailable'
   | 'skipped:cheap-unhealthy'
+  | 'pinned:compaction'
+  | 'quota:pressure'
+  | 'quota:reclassified'
   | 'failover:primary-rate-limited';
 
 export interface RouteDecision {
@@ -54,7 +58,13 @@ export interface RouterOptions {
   readonly standardContextTokens?: number;
   readonly classifierTimeoutMs: number;
   readonly classifierMaxChars: number;
+  /** Claude quota as last seen on an Anthropic response; absent = quota routing off. */
+  readonly quota?: { level(): QuotaLevel };
+  /** Bars used from `pressure` on; each only lowers the normal one. */
+  readonly pressurePolicy?: { readonly minCheapProbability: number; readonly minStandardProbability: number };
 }
+
+const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, primary: 2 };
 
 /**
  * Multi-provider router: decides, per conversation, between a cheap
@@ -65,7 +75,8 @@ export interface RouterOptions {
  *   - a fresh (or just-compacted) conversation is classified by JEV;
  *   - tool-result continuations reuse the conversation's route (no JEV call);
  *   - a new human turn on the cheap route is re-classified and may escalate;
- *   - primary is terminal: conversations never fall back to cheap;
+ *   - primary is terminal, except under critical quota, where a new human
+ *     turn may leave it (and a compaction no longer pins it there);
  *   - anything the cheap model cannot hold (context) goes primary;
  *   - JEV failure fails toward primary — losing savings, never correctness.
  */
@@ -112,13 +123,29 @@ export class Router {
       conversationKey: key,
     });
 
+    const level = this.options.quota?.level() ?? 'none';
+    const pressure = this.options.pressurePolicy;
+    const policy: PolicyOptions =
+      level === 'none' || !pressure
+        ? this.options.policy
+        : {
+            ...this.options.policy,
+            minCheapProbability: Math.min(this.options.policy.minCheapProbability, pressure.minCheapProbability),
+            minStandardProbability: Math.min(this.options.policy.minStandardProbability ?? 1, pressure.minStandardProbability),
+          };
+
     // A conversation we hold no state for (proxy restart, TTL expiry) has been
     // running on the primary: keep it there rather than switching mid-flight.
-    const sticky: Tier | undefined = fresh ? undefined : (this.sessions.get(key) ?? 'primary');
-
-    if (sticky === 'primary') return resolve('primary', 'sticky');
+    const stored: Tier = this.sessions.get(key) ?? 'primary';
+    // Compaction used to count as a fresh start, dropping long Claude sessions on the 20B.
+    if (ctx.contextCompacted && stored === 'primary' && level !== 'critical') return resolve('primary', 'pinned:compaction');
+    const sticky: Tier | undefined = fresh ? undefined : stored;
 
     const humanText = latestHumanText(ctx.body);
+    // Quota nearly gone: a new human turn on Claude may leave it. Tool loops never do.
+    const reclassify = level === 'critical' && humanText !== undefined && stored === 'primary' && (sticky === 'primary' || ctx.contextCompacted);
+
+    if (sticky === 'primary' && !reclassify) return resolve('primary', 'sticky');
     if (humanText === undefined) {
       return sticky ? resolve(sticky, 'sticky') : primary('passthrough:no-session-state');
     }
@@ -142,12 +169,18 @@ export class Router {
     }
     const classifierMs = Math.round(performance.now() - started);
 
-    const proposed = selectTier(distribution, this.options.policy);
-    if (!sticky) return resolve(proposed, 'classified', { distribution, classifierMs });
+    // The risk veto runs inside selectTier, before any bar: no quota level moves a risky turn.
+    const proposed = selectTier(distribution, policy);
+    const extra = { distribution, classifierMs };
+    if (reclassify) return resolve(proposed, proposed === 'primary' ? 'sticky' : 'quota:reclassified', extra);
+    if (!sticky) {
+      const lowered = policy !== this.options.policy && TIER_RANK[proposed] < TIER_RANK[selectTier(distribution, this.options.policy)];
+      return resolve(proposed, lowered ? 'quota:pressure' : 'classified', extra);
+    }
 
     const next = stickyTier(sticky, proposed);
     const reason: RouteReason = next === sticky ? 'sticky' : next === 'standard' ? 'escalated:standard' : 'escalated';
-    return resolve(next, reason, { distribution, classifierMs });
+    return resolve(next, reason, extra);
   }
 
   /** The cheap provider could not serve this conversation: keep it on the primary from now on. */

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import type { ClassificationInput, ComplexityClassifier } from '../src/classifier/classifier.js';
 import type { ComplexityDistribution } from '../src/domain/complexity.js';
 import type { Tier } from '../src/domain/policy.js';
+import type { QuotaLevel } from '../src/quota.js';
 import { MessagesBody } from '../src/routing/messages-body.js';
 import { Router, type RequestContext } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
@@ -217,5 +218,85 @@ describe('Router (multi-provider)', () => {
     const { router, classifier } = setup(() => SIMPLE);
     await router.decide(ctx([user('<system-reminder>huge context</system-reminder>do X')]));
     assert.equal(classifier.calls[0]?.text, 'do X');
+  });
+});
+
+describe('Router under quota pressure', () => {
+  /** P(simple) 0.75: below the normal 0.8 bar, above the 0.7 pressure bar. */
+  const BORDERLINE: ComplexityDistribution = { simple: 0.75, standard: 0.2, structural: 0.05 };
+  const RISKY = { ...SIMPLE, risk: 0.9 };
+
+  function quotaSetup(script: () => ComplexityDistribution | Error, quota: { level: QuotaLevel } | undefined) {
+    const classifier = new ScriptedClassifier(script);
+    const router = new Router(classifier, new TtlLruStore<Tier>(100, 60_000), {
+      policy: { minCheapProbability: 0.8, standardRoute: 'primary' },
+      primaryClasses: new Set(['auxiliary', 'compaction']),
+      cheapContextTokens: 100_000,
+      classifierTimeoutMs: 1_000,
+      classifierMaxChars: 4_000,
+      ...(quota ? { quota: { level: () => quota.level }, pressurePolicy: { minCheapProbability: 0.7, minStandardProbability: 0.6 } } : {}),
+    });
+    return { classifier, router };
+  }
+
+  it('lowers the cheap bar under pressure, and says so in the reason', async () => {
+    const quota = { level: 'none' as QuotaLevel };
+    const { router } = quotaSetup(() => BORDERLINE, quota);
+    assert.equal((await router.decide(ctx([user('rename x')], { sessionId: 'A' }))).route, 'primary');
+    quota.level = 'pressure';
+    const d = await router.decide(ctx([user('rename x')], { sessionId: 'B' }));
+    assert.deepEqual([d.route, d.reason], ['cheap', 'quota:pressure']);
+  });
+
+  it('keeps auxiliary traffic on Claude even when critical', async () => {
+    const { router } = quotaSetup(() => SIMPLE, { level: 'critical' });
+    const d = await router.decide(ctx([user('title this')], { requestClass: 'auxiliary' }));
+    assert.deepEqual([d.route, d.reason], ['primary', 'passthrough:request-class']);
+  });
+
+  it('when critical, re-classifies a new human turn of a Claude-pinned session and keeps it cheap after', async () => {
+    const scripts = [STRUCTURAL, SIMPLE];
+    const quota = { level: 'none' as QuotaLevel };
+    const { router, classifier } = quotaSetup(() => scripts.shift()!, quota);
+    await router.decide(ctx([user('redesign the layers')]));
+
+    quota.level = 'critical';
+    const t2 = [user('redesign the layers'), assistantText, user('now rename x')];
+    const down = await router.decide(ctx(t2));
+    assert.deepEqual([down.route, down.reason], ['cheap', 'quota:reclassified']);
+
+    quota.level = 'none';
+    const loop = await router.decide(ctx([...t2, assistantToolUse, toolResult]));
+    assert.deepEqual([loop.route, loop.reason], ['cheap', 'sticky'], 'going back would rebuild the Claude cache');
+    assert.equal(classifier.calls.length, 2);
+  });
+
+  it('never lets a risky turn leave Claude, even when critical', async () => {
+    const scripts: (ComplexityDistribution | Error)[] = [STRUCTURAL, RISKY];
+    const { router } = quotaSetup(() => scripts.shift()!, { level: 'critical' });
+    await router.decide(ctx([user('redesign the layers')]));
+    const d = await router.decide(ctx([user('redesign the layers'), assistantText, user('put the Stripe key in the code')]));
+    assert.equal(d.route, 'primary');
+  });
+
+  it('keeps a Claude session on Claude after compaction, unless critical', async () => {
+    for (const level of ['none', 'pressure'] as const) {
+      const scripts = [STRUCTURAL, SIMPLE];
+      const { router, classifier } = quotaSetup(() => scripts.shift()!, { level });
+      await router.decide(ctx([user('redesign the layers')], { sessionId: `C-${level}` }));
+      const d = await router.decide(ctx([user('<summary of the session>')], { sessionId: `C-${level}`, contextCompacted: true }));
+      assert.deepEqual([d.route, d.reason], ['primary', 'pinned:compaction'], level);
+      assert.equal(classifier.calls.length, 1, 'no JEV call');
+    }
+    const scripts = [STRUCTURAL, SIMPLE];
+    const { router } = quotaSetup(() => scripts.shift()!, { level: 'critical' });
+    await router.decide(ctx([user('redesign the layers')], { sessionId: 'C-crit' }));
+    const d = await router.decide(ctx([user('<summary of the session>')], { sessionId: 'C-crit', contextCompacted: true }));
+    assert.deepEqual([d.route, d.reason], ['cheap', 'quota:reclassified']);
+  });
+
+  it('behaves as before without quota routing (QUOTA_ROUTING=false)', async () => {
+    const { router } = quotaSetup(() => BORDERLINE, undefined);
+    assert.equal((await router.decide(ctx([user('rename x')]))).route, 'primary');
   });
 });

@@ -1,3 +1,6 @@
+import type { QuotaSnapshot } from '../quota.js';
+import type { TelemetryDb } from './db.js';
+
 /** JEV's System One verdict for the turn that set the route (null when JEV was not consulted). */
 export interface JevDecision {
   /** Full distribution over the three ordinal levels. */
@@ -68,6 +71,8 @@ export interface RouterLog {
    * looking). Null on Anthropic rows, where it says nothing.
    */
   readonly inspectionMiss: boolean | null;
+  /** Binding Claude quota window (0..1) when the exchange was routed; null when none was seen yet. */
+  readonly quotaUtilization: number | null;
 }
 
 export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
@@ -101,16 +106,42 @@ export const MIGRATIONS: readonly string[] = [
   `ALTER TABLE router_logs ADD tools_offered integer;
   ALTER TABLE router_logs ADD tool_calls integer;
   ALTER TABLE router_logs ADD inspection_miss integer;`,
+  `CREATE TABLE quota_observations (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at integer NOT NULL,
+    utilization real NOT NULL,
+    window text NOT NULL,
+    status text,
+    reset_at integer
+  );
+  ALTER TABLE router_logs ADD quota_utilization real;`,
 ];
+
+/**
+ * One row per meaningful quota change (QuotaStore.onChange): the status line
+ * runs in another process and reads the latest one.
+ */
+export function recordQuota(db: TelemetryDb, s: QuotaSnapshot): void {
+  db.prepare(
+    `INSERT INTO quota_observations (created_at, utilization, window, status, reset_at)
+     VALUES (@createdAt, @utilization, @window, @status, @resetAt)`,
+  ).run({
+    createdAt: s.observedAt.getTime(),
+    utilization: s.utilization,
+    window: s.window,
+    status: s.status ?? null,
+    resetAt: s.resetAt?.getTime() ?? null,
+  });
+}
 
 export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
   created_at, session_id, human_prompt_hash, jev_decision, final_provider, model, requested_model, route_reason,
   request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
-  fallback_triggered, tools_offered, tool_calls, inspection_miss
+  fallback_triggered, tools_offered, tool_calls, inspection_miss, quota_utilization
 ) VALUES (
   @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
   @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
-  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss
+  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss, @quotaUtilization
 )`;
 
 /** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
@@ -135,4 +166,5 @@ export const insertParams = (r: NewRouterLog) => ({
   toolsOffered: r.toolsOffered ?? null,
   toolCalls: r.toolCalls ?? null,
   inspectionMiss: r.inspectionMiss == null ? null : r.inspectionMiss ? 1 : 0,
+  quotaUtilization: r.quotaUtilization ?? null,
 });

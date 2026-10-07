@@ -16,6 +16,8 @@ export interface ExchangeContext {
   readonly requestedModel: string | undefined;
   /** Size of `body.tools`: a cheap answer that used none of them is an inspection miss. */
   readonly toolsOffered: number;
+  /** Binding Claude quota window when the exchange was routed. */
+  readonly quotaUtilization?: number | undefined;
 }
 
 export interface UpstreamOutcome {
@@ -151,5 +153,6 @@ function record(
     toolsOffered: ctx.toolsOffered,
     toolCalls: result.toolCalls,
     inspectionMiss: cheap ? result.outcome === 'ok' && ctx.toolsOffered > 0 && result.toolCalls === 0 : null,
+    quotaUtilization: ctx.quotaUtilization ?? null,
   });
 }

@@ -47,13 +47,24 @@ const Env = z
     ROUTER_MIN_STANDARD_PROBABILITY: z.coerce.number().min(0).max(1).default(0.75),
     ROUTER_STANDARD_ROUTE: z.enum(['primary', 'cheap']).default('primary'),
     ROUTER_PRIMARY_CLASSES: csv.default(new Set(['auxiliary', 'compaction'])),
-    FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(false),
+    FAILOVER_ON_PRIMARY_RATE_LIMIT: bool.default(true),
+
+    // Quota routing: from QUOTA_PRESSURE of the binding Claude window the cheap bars drop;
+    // from QUOTA_CRITICAL a new human turn may leave a Claude-pinned session.
+    QUOTA_ROUTING: bool.default(true),
+    QUOTA_PRESSURE: z.coerce.number().min(0).max(1).default(0.8),
+    QUOTA_CRITICAL: z.coerce.number().min(0).max(1).default(0.95),
+    QUOTA_PRESSURE_MIN_CHEAP: z.coerce.number().min(0).max(1).default(0.7),
+    QUOTA_PRESSURE_MIN_STANDARD: z.coerce.number().min(0).max(1).default(0.6),
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
 
     TELEMETRY_ENABLED: bool.default(true),
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
   })
   .superRefine((env, ctx) => {
+    if (env.QUOTA_CRITICAL < env.QUOTA_PRESSURE) {
+      ctx.addIssue({ code: 'custom', path: ['QUOTA_CRITICAL'], message: 'must be >= QUOTA_PRESSURE' });
+    }
     if (env.CONTROL_PORT === 0 && env.PORT === 65_535) {
       ctx.addIssue({ code: 'custom', path: ['CONTROL_PORT'], message: 'PORT is 65535: set CONTROL_PORT explicitly' });
     }
@@ -105,6 +116,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     logLevel: e.LOG_LEVEL,
     supervisor: { enabled: e.SUPERVISOR_ENABLED, controlPort: e.CONTROL_PORT || e.PORT + 1, drainMs: e.RELOAD_DRAIN_MS },
     cheapHealth: { enabled: e.CHEAP_HEALTH_ENABLED, intervalMs: e.CHEAP_HEALTH_INTERVAL_MS },
+    quota: {
+      enabled: e.QUOTA_ROUTING,
+      pressure: e.QUOTA_PRESSURE,
+      critical: e.QUOTA_CRITICAL,
+      minCheapProbability: e.QUOTA_PRESSURE_MIN_CHEAP,
+      minStandardProbability: e.QUOTA_PRESSURE_MIN_STANDARD,
+    },
     primary: {
       baseUrl: trimSlash(e.ANTHROPIC_UPSTREAM_URL),
       authMode: e.UPSTREAM_AUTH_MODE,

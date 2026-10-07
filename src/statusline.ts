@@ -1,7 +1,14 @@
 import { existsSync } from 'node:fs';
 import { isStaleBuild, type BuildInfo } from './build-info.js';
 import { openTelemetryDb } from './telemetry/db.js';
-import { cheapShare, lastRoute, renderStatusLine, sessionContext, type StatusLineData } from './telemetry/statusline.js';
+import {
+  cheapShare,
+  lastRoute,
+  latestQuota,
+  renderStatusLine,
+  sessionContext,
+  type StatusLineData,
+} from './telemetry/statusline.js';
 
 const HEALTH_TIMEOUT_MS = 500;
 const STDIN_TIMEOUT_MS = 300;
@@ -42,7 +49,13 @@ export async function statusLine({ dbPath, healthUrl, sessionId, localBuild }: S
         midnight.setHours(0, 0, 0, 0);
         const last = lastRoute(db, sessionId);
         const context = sessionContext(db, sessionId);
-        data = { ...data, ...(last ? { last } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
+        let quota: ReturnType<typeof latestQuota>;
+        try {
+          quota = latestQuota(db);
+        } catch {
+          // Database not migrated yet (old router still running): no quota to show.
+        }
+        data = { ...data, ...(last ? { last } : {}), ...(quota ? { quota } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
       } finally {
         db.close();
       }

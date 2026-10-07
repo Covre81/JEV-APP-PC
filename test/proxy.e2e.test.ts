@@ -292,6 +292,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
           toolsOffered: r.tools_offered,
           toolCalls: r.tool_calls,
           inspectionMiss: r.inspection_miss === null ? null : r.inspection_miss === 1,
+          quotaUtilization: r.quota_utilization,
         }),
       );
       if (rows.length > 0) return rows;

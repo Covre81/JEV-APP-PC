@@ -2,6 +2,7 @@ import { computeNetCost, type CostRow, type NetCost } from './cost.js';
 import type { TelemetryDb } from './db.js';
 import { pricingFromEnv, type Pricing } from './pricing.js';
 import type { FinalProvider } from './schema.js';
+import { latestQuota } from './statusline.js';
 
 export interface ProviderStats {
   readonly requests: number;
@@ -28,6 +29,10 @@ export interface RouterStats {
   readonly cheapStreamErrors: number;
   /** Cheap answers, delivered ok, that called none of the tools offered: likely made up without looking. */
   readonly inspectionMisses: number;
+  /** Turns that left Claude because of the quota: quota:* reasons and the 429/529 failover. */
+  readonly quotaRouted: number;
+  /** Latest persisted Claude quota reading (any age). */
+  readonly lastQuota: { readonly utilization: number; readonly window: string; readonly createdAt: Date } | null;
   /** Human prompts sent more than once (same sha256), and the extra sends. */
   readonly repeatedPrompts: number;
   readonly repeatedSends: number;
@@ -101,6 +106,12 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     ...r,
   }));
 
+  const quotaRouted = get<{ n: number }>(
+    `SELECT count(*) AS n FROM router_logs ${inWindow}
+     AND (route_reason LIKE 'quota:%' OR route_reason = 'failover:primary-rate-limited')`,
+  ).n;
+  const lastQuota = latestQuota(db, { maxAgeMs: Infinity }) ?? null;
+
   const inspectionMisses = get<{ n: number }>(
     `SELECT coalesce(sum(inspection_miss), 0) AS n FROM router_logs ${inWindow}`,
   ).n;
@@ -129,6 +140,8 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     fallbacks: summary.fallbacks,
     cheapStreamErrors,
     inspectionMisses,
+    quotaRouted,
+    lastQuota,
     repeatedPrompts: repeats.length,
     repeatedSends: repeats.reduce((n, r) => n + r.sends - 1, 0),
     estimatedTokensSaved: summary.saved,
@@ -170,6 +183,11 @@ export function renderStats(s: RouterStats): string {
     ['  served OK by cheap provider', fmt(o.ok)],
     ['  cheap stream errors (retried on Anthropic)', fmt(s.cheapStreamErrors)],
     ['Cheap answers without tool use (inspection miss)', fmt(s.inspectionMisses)],
+    ['Sent cheap by quota pressure', fmt(s.quotaRouted)],
+    [
+      'Claude quota (last seen)',
+      s.lastQuota ? `${Math.round(s.lastQuota.utilization * 100)}% ${s.lastQuota.window}` : '—',
+    ],
     ['Fallbacks cheap → Anthropic', fmt(s.fallbacks)],
     ['Scored by JEV', fmt(s.classified)],
     ['Repeated prompts (extra sends)', `${fmt(s.repeatedPrompts)} (${fmt(s.repeatedSends)})`],
