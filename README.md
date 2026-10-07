@@ -92,8 +92,10 @@ only on work that needs Claude**.
 
 ```
 src/
-├── cli.ts                         # `jev-router` binary: serve | stats | statusline | help; env-file loading
+├── cli.ts                         # `jev-router` binary: serve | reload | stats | statusline | help; env-file loading
 ├── serve.ts                       # composition root (only file that knows concrete classes)
+├── supervisor.ts                  # reverse proxy over a forked worker: reload without dropping sessions
+├── build-info.ts                  # dist/build-info.json (sha + build time) for /healthz and the status line
 ├── statusline.ts                  # `jev-router statusline`: health probe + session's last route
 ├── config.ts                      # zod-validated env → typed Config; fails fast at boot
 ├── paths.ts                       # ~/.jev-router (or $JEV_ROUTER_HOME): .env + telemetry.db
@@ -111,6 +113,7 @@ src/
 ├── providers/                     # executes; every provider answers in Anthropic format
 │   ├── provider.ts                # Provider port: response | unavailable
 │   ├── anthropic.ts               # byte-level forwarder (primary)
+│   ├── cheap-health.ts            # polls the cheap provider's /models: skip it while it is down
 │   └── openai/
 │       ├── provider.ts            # OpenAI-compatible provider (cheap)
 │       ├── translate-request.ts   # Anthropic Messages → Chat Completions
@@ -224,6 +227,41 @@ then `./.env`, then `~/.jev-router/.env`. `JEV_ROUTER_HOME` moves the
 `~/.jev-router` directory. After `git pull`, run `npm run build` again; the
 link points at this checkout, so nothing else needs reinstalling.
 
+### Reload without dropping sessions
+
+Every Claude Code session goes through the router, so restarting it used to
+cut them all. `jev-router serve` now runs as a **supervisor**: it owns
+`HOST:PORT`, forks the real gateway as a worker on an ephemeral loopback port,
+and pipes every request to it (unbuffered, so SSE streams flow as written).
+
+```bash
+npm run build
+jev-router reload          # or: node dist/cli.js reload --env .env
+```
+
+`reload` asks the supervisor (loopback-only control port, `CONTROL_PORT`,
+default `PORT + 1`) to start a fresh worker from the new `dist/`. Once it
+listens, new requests go to it; the old worker finishes its open streams and
+is cut after `RELOAD_DRAIN_MS` (default 2 min). The worker re-reads the env
+file, so `.env` changes also apply on `reload`; only `HOST`, `PORT`,
+`CONTROL_PORT` and `RELOAD_DRAIN_MS` belong to the supervisor and need a
+restart. A crashed worker is restarted after 1, 2, 4, 4 and 4 s; after that
+the supervisor answers 503 and waits for a `reload`. A change to
+`supervisor.ts` itself also needs a restart.
+
+`/healthz` reports which build answers:
+`{ok, sha, builtAt, startedAt, pid, cheap}`, where `cheap` is the cheap
+provider's health (`unknown | up | down`). The build stamps
+`dist/build-info.json` (`git rev-parse --short=12 HEAD` + time). For
+`npm run dev` (tsx watch), set `SUPERVISOR_ENABLED=false`.
+
+**Cheap provider health.** The worker polls `GET {CHEAP_BASE_URL}/models`
+every `CHEAP_HEALTH_INTERVAL_MS` (30 s). While it is `down`, a turn routed
+cheap goes to Anthropic with reason `skipped:cheap-unhealthy`, without
+spending an attempt and without pinning the conversation to Anthropic: it
+returns to cheap once the provider is back. Caveat: Ollama's `/models` proves
+the daemon is up, not that ollama.com serves a `*-cloud` model.
+
 **Cheap provider presets:**
 
 ```bash
@@ -295,7 +333,10 @@ up and where the session's last turn went, add to the same `settings.json`:
 ```
 
 It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
-`jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms. The
+`jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms.
+`⚠ build velho` means `dist/build-info.json` is newer than the build that
+answers `/healthz` (built but not reloaded: run `jev-router reload`);
+`cheap ✗` means the health check sees the cheap provider down. The
 reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
 asked (`sticky`, `auxiliary`, …). `today 12/40 cheap` counts today's routed
 turns, not requests: main-agent human turns plus every turn JEV scored

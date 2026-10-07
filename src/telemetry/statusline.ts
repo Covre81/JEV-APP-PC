@@ -4,6 +4,10 @@ import type { FinalProvider, Outcome } from './schema.js';
 /** What the Claude Code status line needs: is the router up, and where did this session's last turn go. */
 export interface StatusLineData {
   readonly healthy: boolean;
+  /** The build on disk is newer than the one running: someone forgot `jev-router reload`. */
+  readonly staleBuild?: boolean;
+  /** The router's health check sees the cheap provider down: cheap turns go to Claude. */
+  readonly cheapDown?: boolean;
   readonly last?: LastRoute;
   /** Today's routed turns (see cheapShare), and how many the cheap model answered. */
   readonly today?: { readonly cheap: number; readonly total: number };
@@ -83,9 +87,11 @@ export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total
 }
 
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
-export function renderStatusLine({ healthy, last, today, context }: StatusLineData): string {
+export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, context }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
   const parts = ['jev-router ✓'];
+  if (staleBuild) parts.push('⚠ build velho');
+  if (cheapDown) parts.push('cheap ✗');
   if (last) {
     const where = last.provider === 'openai' ? 'cheap' : 'claude';
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;

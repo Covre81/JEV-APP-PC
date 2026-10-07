@@ -19,6 +19,7 @@ export type RouteReason =
   | 'escalated'
   | 'escalated:context'
   | 'failover:cheap-unavailable'
+  | 'skipped:cheap-unhealthy'
   | 'failover:primary-rate-limited';
 
 export interface RouteDecision {

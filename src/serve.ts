@@ -1,13 +1,17 @@
+import type { AddressInfo } from 'node:net';
+import { runningBuild } from './build-info.js';
 import type { ComplexityClassifier } from './classifier/classifier.js';
 import { HeuristicClassifier } from './classifier/heuristic-classifier.js';
 import { JevClassifier } from './classifier/jev-classifier.js';
 import { removedEnvSet, type Config } from './config.js';
 import type { Route } from './domain/policy.js';
 import { AnthropicProvider } from './providers/anthropic.js';
+import { CheapHealth } from './providers/cheap-health.js';
 import { OpenAICompatibleProvider } from './providers/openai/provider.js';
 import { buildServer } from './proxy/server.js';
 import { Router } from './routing/router.js';
 import { TtlLruStore } from './routing/session-store.js';
+import { startSupervisor, type WorkerProcess } from './supervisor.js';
 import { openTelemetryDb } from './telemetry/db.js';
 import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/recorder.js';
 
@@ -16,8 +20,12 @@ import { noopTelemetry, SqliteTelemetry, type TelemetrySink } from './telemetry/
 // correctness. Raise it only if `stats` shows that under heavy parallel use.
 const SESSION_MAX_ENTRIES = 10_000;
 
-/** Composition root: the only place that knows concrete implementations. */
-export async function serve(config: Config): Promise<void> {
+/**
+ * Composition root: the only place that knows concrete implementations.
+ * As a supervisor's worker it listens on an ephemeral loopback port and
+ * reports it over IPC; otherwise it owns HOST:PORT itself.
+ */
+export async function serve(config: Config, { worker = false } = {}): Promise<void> {
   const classifier: ComplexityClassifier =
     config.classifier.kind === 'jev'
       ? new JevClassifier({
@@ -47,18 +55,42 @@ export async function serve(config: Config): Promise<void> {
 
   // Errors surface through the server's logger, which exists only after buildServer.
   let logTelemetryError: (err: unknown) => void = () => {};
+  let logCheapState: (state: string) => void = () => {};
   const telemetry: TelemetrySink = config.telemetry.dbPath
     ? new SqliteTelemetry(openTelemetryDb(config.telemetry.dbPath), { onError: (err) => logTelemetryError(err) })
     : noopTelemetry;
+  const cheapHealth = config.cheapHealth.enabled
+    ? new CheapHealth({
+        baseUrl: config.cheap.baseUrl,
+        apiKey: config.cheap.apiKey,
+        intervalMs: config.cheapHealth.intervalMs,
+        onChange: (state) => logCheapState(state),
+      })
+    : undefined;
 
-  const app = buildServer({ config, router, providers, telemetry });
+  const build = runningBuild();
+  const app = buildServer({ config, router, providers, telemetry, ...(cheapHealth ? { cheapHealth } : {}), ...(build ? { build } : {}) });
   logTelemetryError = (err) => app.log.error({ err }, 'telemetry write failed');
+  logCheapState = (state) => app.log[state === 'down' ? 'warn' : 'info']({ cheap: state }, 'cheap provider health changed');
   app.addHook('onClose', () => telemetry.close());
+  app.addHook('onClose', () => cheapHealth?.stop());
 
-  await app.listen({ host: config.host, port: config.port });
+  await cheapHealth?.start();
+  await app.listen(worker ? { host: '127.0.0.1', port: 0 } : { host: config.host, port: config.port });
+  if (worker) {
+    process.send?.({ type: 'listening', port: (app.server.address() as AddressInfo).port });
+    process.on('message', (msg: { type?: string } | null) => {
+      // Retired by a reload: stop taking connections; the supervisor cuts leftovers after RELOAD_DRAIN_MS.
+      if (msg?.type === 'drain') void app.close().then(() => process.exit(0));
+    });
+    // Supervisor gone (crash, killed task): never linger as an orphan.
+    process.once('disconnect', () => void app.close().then(() => process.exit(0)));
+  }
   app.log.info(
     {
       classifier: classifier.name,
+      build: build?.sha ?? 'src',
+      ...(worker ? { worker: true } : {}),
       primary: config.primary.baseUrl,
       cheap: `${config.cheap.baseUrl} (${config.cheap.model})`,
       telemetry: config.telemetry.dbPath ?? 'disabled',
@@ -71,6 +103,22 @@ export async function serve(config: Config): Promise<void> {
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
       void app.close().then(() => process.exit(0));
+    });
+  }
+}
+
+/** Supervisor mode: owns HOST:PORT and the control port, forwards to a forked worker. */
+export async function supervise(config: Config, forkWorker: () => WorkerProcess): Promise<void> {
+  const supervisor = await startSupervisor({
+    host: config.host,
+    port: config.port,
+    controlPort: config.supervisor.controlPort,
+    drainMs: config.supervisor.drainMs,
+    forkWorker,
+  });
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      void supervisor.close().then(() => process.exit(0));
     });
   }
 }

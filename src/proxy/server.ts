@@ -2,8 +2,10 @@ import { timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Dispatcher } from 'undici';
+import type { BuildInfo } from '../build-info.js';
 import type { Config } from '../config.js';
 import type { Route } from '../domain/policy.js';
+import type { CheapState } from '../providers/cheap-health.js';
 import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
 import { latestHumanText, parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
 import type { RouteDecision, Router } from '../routing/router.js';
@@ -16,6 +18,10 @@ export interface ServerDeps {
   readonly router: Router;
   readonly providers: Readonly<Record<Route, Provider>>;
   readonly telemetry?: TelemetrySink;
+  /** Live cheap-provider health; absent = never checked ('unknown'). */
+  readonly cheapHealth?: { readonly state: CheapState };
+  /** The build this process runs; absent when running from src. */
+  readonly build?: BuildInfo;
 }
 
 /** Primary statuses that mean "no quota/capacity right now" (opt-in failover to cheap). */
@@ -31,7 +37,15 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
-export function buildServer({ config, router, providers, telemetry = noopTelemetry }: ServerDeps): FastifyInstance {
+export function buildServer({
+  config,
+  router,
+  providers,
+  telemetry = noopTelemetry,
+  cheapHealth,
+  build,
+}: ServerDeps): FastifyInstance {
+  const startedAt = new Date().toISOString();
   const app = Fastify({
     logger: { level: config.logLevel },
     bodyLimit: config.bodyLimitBytes,
@@ -53,7 +67,15 @@ export function buildServer({ config, router, providers, telemetry = noopTelemet
     });
   }
 
-  app.get('/healthz', async () => ({ ok: true }));
+  // Which build answers: a merge that was built but never reloaded shows up here and in the status line.
+  app.get('/healthz', async () => ({
+    ok: true,
+    sha: build?.sha ?? null,
+    builtAt: build?.builtAt ?? null,
+    startedAt,
+    pid: process.pid,
+    cheap: cheapHealth?.state ?? 'unknown',
+  }));
   app.post('/v1/messages', handleMessages);
   // count_tokens, /v1/models, HEAD /api/hello, … are Anthropic concerns: pass through.
   app.all('*', async (req, reply) => relay(reply, await providers.primary.send(providerRequest(req, reply))));
@@ -83,8 +105,15 @@ export function buildServer({ config, router, providers, telemetry = noopTelemet
       requestedModel: base.body!.model,
     });
 
+    // A provider known to be down costs a failed attempt per turn: skip it, and do not
+    // pin the conversation, so it returns to cheap once the provider is back.
+    if (decision.route === 'cheap' && cheapHealth?.state === 'down') {
+      const skipped: RouteDecision = { ...decision, route: 'primary', reason: 'skipped:cheap-unhealthy' };
+      return relay(reply, await providers.primary.send(base), skipped, req, exchange('primary'));
+    }
+
     if (decision.route === 'cheap') {
-      const cheap = await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      const cheap =await providers.cheap.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
       if (cheap.kind === 'response') return relay(reply, cheap, decision, req, exchange('cheap'));
 
       router.pinToPrimary(decision);

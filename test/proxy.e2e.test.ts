@@ -481,7 +481,9 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
   it('leaves /healthz open', async () => {
     const res = await request(`${proxyUrl}/healthz`);
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(await res.body.json(), { ok: true });
+    const body = (await res.body.json()) as Record<string, unknown>;
+    assert.equal(body['ok'], true);
+    assert.equal(body['cheap'], 'unknown', 'no health check wired');
   });
 });
 

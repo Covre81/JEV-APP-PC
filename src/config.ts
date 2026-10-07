@@ -12,6 +12,11 @@ const Env = z
     PORT: z.coerce.number().int().min(1).max(65_535).default(8787),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
+    SUPERVISOR_ENABLED: bool.default(true),
+    // 0 = PORT + 1. Loopback-only: it accepts `jev-router reload`.
+    CONTROL_PORT: z.coerce.number().int().min(0).max(65_535).default(0),
+    RELOAD_DRAIN_MS: z.coerce.number().int().min(0).default(120_000),
+
     ANTHROPIC_UPSTREAM_URL: z.url().default('https://api.anthropic.com'),
     UPSTREAM_AUTH_MODE: z.enum(['passthrough', 'inject']).default('passthrough'),
     ANTHROPIC_API_KEY: z.string().min(1).optional(),
@@ -32,6 +37,8 @@ const Env = z
     CHEAP_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8_192),
     CHEAP_CONTEXT_TOKENS: z.coerce.number().int().positive().default(131_072),
     CHEAP_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+    CHEAP_HEALTH_ENABLED: bool.default(true),
+    CHEAP_HEALTH_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
 
     ROUTER_MIN_CHEAP_PROBABILITY: z.coerce.number().min(0).max(1).default(0.8),
     ROUTER_STANDARD_ROUTE: z.enum(['primary', 'cheap']).default('primary'),
@@ -43,6 +50,9 @@ const Env = z
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
   })
   .superRefine((env, ctx) => {
+    if (env.CONTROL_PORT === 0 && env.PORT === 65_535) {
+      ctx.addIssue({ code: 'custom', path: ['CONTROL_PORT'], message: 'PORT is 65535: set CONTROL_PORT explicitly' });
+    }
     if (env.CLASSIFIER === 'jev' && !env.TYPESAFE_API_KEY) {
       ctx.addIssue({ code: 'custom', path: ['TYPESAFE_API_KEY'], message: 'required when CLASSIFIER=jev' });
     }
@@ -66,7 +76,15 @@ export function removedEnvSet(env: NodeJS.ProcessEnv = process.env): string[] {
   return REMOVED_ENV.filter((name) => env[name] !== undefined);
 }
 
-export type Config = Readonly<ReturnType<typeof loadConfig>>;
+/**
+ * Control port without the rest of the config: `jev-router reload` must work
+ * without provider keys. Same rule as loadConfig (0 = PORT + 1).
+ */
+export function controlPort(env: NodeJS.ProcessEnv = process.env): number {
+  return Number(env['CONTROL_PORT'] || 0) || Number(env['PORT'] || 8787) + 1;
+}
+
+export type Config =Readonly<ReturnType<typeof loadConfig>>;
 
 /** Parse once at boot; any misconfiguration kills the process before it listens. */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
@@ -81,6 +99,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     host: e.HOST,
     port: e.PORT,
     logLevel: e.LOG_LEVEL,
+    supervisor: { enabled: e.SUPERVISOR_ENABLED, controlPort: e.CONTROL_PORT || e.PORT + 1, drainMs: e.RELOAD_DRAIN_MS },
+    cheapHealth: { enabled: e.CHEAP_HEALTH_ENABLED, intervalMs: e.CHEAP_HEALTH_INTERVAL_MS },
     primary: {
       baseUrl: trimSlash(e.ANTHROPIC_UPSTREAM_URL),
       authMode: e.UPSTREAM_AUTH_MODE,

@@ -21,6 +21,27 @@ describe('loadConfig security guards', () => {
   });
 });
 
+describe('supervisor settings', () => {
+  it('puts the control port next to the listener by default', () => {
+    const config = loadConfig(base);
+    assert.equal(config.supervisor.enabled, true);
+    assert.equal(config.supervisor.controlPort, 8788);
+    assert.equal(config.supervisor.drainMs, 120_000);
+    assert.equal(loadConfig({ ...base, PORT: '9000' }).supervisor.controlPort, 9001);
+    assert.equal(loadConfig({ ...base, CONTROL_PORT: '7000' }).supervisor.controlPort, 7000);
+  });
+
+  it('refuses a derived control port past 65535', () => {
+    assert.throws(() => loadConfig({ ...base, PORT: '65535' }), /CONTROL_PORT/);
+    assert.equal(loadConfig({ ...base, PORT: '65535', CONTROL_PORT: '7000' }).supervisor.controlPort, 7000);
+  });
+
+  it('reads the cheap health check switches', () => {
+    assert.deepEqual(loadConfig(base).cheapHealth, { enabled: true, intervalMs: 30_000 });
+    assert.equal(loadConfig({ ...base, CHEAP_HEALTH_ENABLED: 'false' }).cheapHealth.enabled, false);
+  });
+});
+
 describe('removedEnvSet', () => {
   it('lists env vars that no longer exist but are still set', () => {
     assert.deepEqual(removedEnvSet({ ROUTER_ALLOW_ESCALATION: 'false', HOST: '127.0.0.1' }), ['ROUTER_ALLOW_ESCALATION']);
