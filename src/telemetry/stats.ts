@@ -95,7 +95,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
   }>(`
     SELECT count(*) AS total, min(created_at) AS firstAt, max(created_at) AS lastAt,
       coalesce(sum(CASE WHEN jev_decision IS NOT NULL THEN 1 ELSE 0 END), 0) AS classified,
-      coalesce(sum(fallback_triggered), 0) AS fallbacks,
+      coalesce(sum(CASE WHEN fallback_triggered = 1 AND route_reason != 'failover:gemini-unavailable' THEN 1 ELSE 0 END), 0) AS fallbacks,
       coalesce(sum(CASE WHEN final_provider IN ('openai', 'gemini') AND outcome = 'ok'
         THEN coalesce(tokens_in, 0) + coalesce(tokens_out, 0) ELSE 0 END), 0) AS saved,
       coalesce(sum(CASE WHEN route_reason = 'failover:gemini-unavailable' THEN 1 ELSE 0 END), 0) AS geminiFallbacks,

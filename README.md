@@ -128,7 +128,8 @@ The router can optionally divert medium-to-hard, text-only turns to Gemini using
 
 - **Scope**: Text-only turns (explanations, design discussions, planning, conceptual Q&A, code reviews) that do not require tool use.
 - **Fail-open**: It is off by default and fails open to Claude (e.g. if the CLI is missing, times out, or the tier is busy).
-- **Latency**: ~6–7 s minimum per turn. The answer arrives all at once (simulated streaming).
+- **Latency**: ~6–7 s minimum per turn. The answer arrives all at once (simulated streaming). Real answers take ~25–30 s for a long explanation with gemini-3.1-pro-high (measured), so `GEMINI_TIER_TIMEOUT_MS` may need 90000 for long answers.
+- **API Keys**: The child process is started WITHOUT `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_CLOUD_PROJECT` (stripped from its environment), so agy always uses the Google account login (subscription) and never an API key.
 - **JEV Question**: Uses the `text_answer_suffices` question to determine if the turn can be fully answered with a written reply without running tools.
 - **Isolation and Safety**: The child process runs with a router-owned `agy` profile (`HOME`/`USERPROFILE`) containing explicit deny rules for all tools (`write_file(*)`, `command(*)`, etc.). The temporary working directory is removed immediately. If the model attempts any tool use, the child process is killed instantly and the turn falls back to Claude.
 

@@ -31,31 +31,34 @@ describe('telemetry → stats', () => {
     sink.record(row({ finalProvider: 'openai', humanPromptHash: 'h1', tokensIn: 500, tokensOut: 50 }));
     sink.record(row({ finalProvider: 'openai', outcome: 'stream_error', tokensIn: 999, tokensOut: 9 }));
     sink.record(row({ routeReason: 'failover:cheap-unavailable', fallbackTriggered: true, tokensIn: 3000, tokensOut: 100, cacheReadTokens: 2000 }));
+    sink.record(row({ routeReason: 'failover:gemini-unavailable', fallbackTriggered: true, tokensIn: 3000, tokensOut: 100, cacheReadTokens: 2000 }));
     sink.record(row({ createdAt: new Date('2026-09-01T00:00:00Z'), tokensIn: 7, tokensOut: 7 }));
     sink.flush();
 
     const all = computeStats(db);
-    assert.equal(all.total, 5);
+    assert.equal(all.total, 6);
     assert.equal(all.byProvider.openai.requests, 3);
     assert.equal(all.byProvider.openai.ok, 2);
-    assert.equal(all.byProvider.anthropic.cacheReadTokens, 2000);
+    assert.equal(all.byProvider.anthropic.cacheReadTokens, 4000);
     assert.equal(all.fallbacks, 1);
+    assert.equal(all.geminiFallbacks, 1);
     assert.equal(all.cheapStreamErrors, 1);
     assert.equal(all.classified, 1);
     assert.equal(all.repeatedPrompts, 1);
     assert.equal(all.repeatedSends, 1);
     assert.equal(all.estimatedTokensSaved, 1750, 'only cheap requests served OK count');
 
-    const priced = computeStats(db, { pricing: pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '1', JEV_PRICE_OUTPUT_PER_MTOK: '10' }) });
+    const priced = computeStats(db, { pricing: pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '1', JEV_PRICE_OUTPUT_PER_MTOK: '10', CHEAP_PRICE_INPUT_PER_MTOK: '100', CHEAP_PRICE_OUTPUT_PER_MTOK: '1000' }) });
     assert.ok(Math.abs(priced.cost.jevUsd - (453 * 1 + 20 * 10) / 1_000_000) < 1e-12, 'JEV tokens come from jev_decision');
+    assert.ok(Math.abs(priced.cost.failedCheapUsd - (999 * 100 + 9 * 1000) / 1_000_000) < 1e-12, 'failed cheap ignores gemini failover');
     assert.match(renderStats(priced), /Classifier \(JEV\)/);
     assert.match(renderStats(all), /JEV priced at \$0/);
 
     const recent = computeStats(db, { since: new Date('2026-09-15T00:00:00Z') });
-    assert.equal(recent.total, 4);
+    assert.equal(recent.total, 5);
 
     const text = renderStats(all);
-    assert.match(text, /Requests\s+5/);
+    assert.match(text, /Requests\s+6/);
     assert.match(text, /Estimated Anthropic tokens saved\s+1,750/);
     assert.match(text, /NET \((PROFIT|LOSS)\)/);
     assert.match(text, /Cheap provider priced at \$0/);
