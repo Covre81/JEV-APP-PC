@@ -122,6 +122,25 @@ only on work that needs Claude**.
   showing the model you picked. The truth is in the `x-jev-route` response
   header and the `route decision` log line.
 
+## Gemini tier (Antigravity CLI subscription)
+
+The router can optionally divert medium-to-hard, text-only turns to Gemini using the user's Google subscription via the Antigravity CLI (`agy`) as a child process. This spares the Claude quota for work that needs it, without requiring a separate API key.
+
+- **Scope**: Text-only turns (explanations, design discussions, planning, conceptual Q&A) that do not require tool use.
+- **Fail-open**: It is off by default and fails open to Claude (e.g. if the CLI is missing, times out, or the tier is busy).
+- **Latency**: ~6–7 s minimum per turn. The answer arrives all at once (simulated streaming).
+- **Isolation and Safety**: The child process runs with a router-owned `agy` profile (`HOME`/`USERPROFILE`) containing explicit deny rules for all tools (`write_file(*)`, `command(*)`, etc.). The temporary working directory is removed immediately. If the model attempts any tool use, the child process is killed instantly and the turn falls back to Claude.
+
+**Configuration (Environment variables):**
+- `GEMINI_TIER=on` (default: `off`)
+- `GEMINI_TIER_MODEL=gemini-3.1-pro-high`
+- `GEMINI_TIER_BIN` (default: `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows, `agy` elsewhere)
+- `GEMINI_TIER_TIMEOUT_MS=60000`
+- `GEMINI_TIER_MIN_TEXT_ONLY=0.8` (min JEV confidence that a text answer suffices)
+- `GEMINI_TIER_PRESSURE_MIN_TEXT_ONLY=0.6` (bar when Claude quota is pressured)
+- `GEMINI_TIER_FROM_PRIMARY=true` (evaluate text-only human turns even for Claude-pinned sessions)
+- `GEMINI_TIER_MAX_CONCURRENCY=1`
+
 ## Repository structure
 
 ```
