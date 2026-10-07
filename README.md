@@ -193,7 +193,7 @@ Deliberately absent:
 ## Setup
 
 ```bash
-git clone https://github.com/covre81/jev-app-pc.git jev-router && cd jev-router
+git clone https://github.com/Covre81/JEV-APP-PC.git jev-router && cd jev-router
 npm ci
 cp .env.example .env
 #   TYPESAFE_API_KEY=...   (or CLASSIFIER=heuristic for offline dev)
@@ -289,7 +289,7 @@ up and where the session's last turn went, add to the same `settings.json`:
 {
   "statusLine": {
     "type": "command",
-    "command": "node C:/Dev/JEV-APP-PC/dist/cli.js statusline --env C:/Dev/JEV-APP-PC/.env"
+    "command": "node /path/to/jev-router/dist/cli.js statusline --env /path/to/jev-router/.env"
   }
 }
 ```
@@ -402,7 +402,7 @@ FROM firsts WHERE nth = 1 GROUP BY final_provider;
 ## Checks against real APIs (local only)
 
 CI runs only the offline suite (`npm test`: every upstream is a local fake).
-Three scripts call real services and are meant to be run by hand. Both read the
+Three scripts call real services and are meant to be run by hand. All of them read the
 same env files as the CLI (`--env <file>`, else `./.env`, else
 `~/.jev-router/.env`).
 
