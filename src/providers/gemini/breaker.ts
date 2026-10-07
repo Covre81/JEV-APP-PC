@@ -31,13 +31,20 @@ export class CircuitBreaker {
     return true;
   }
 
-  release(success: boolean): void {
+  release(outcome: 'success' | 'failure' | 'neutral'): void {
     this.inFlight--;
-    if (success) {
+    if (outcome === 'neutral') return;
+
+      if (outcome === 'success') {
       this.failures = 0;
       this.lastFailureTime = 0;
     } else {
-      this.failures++;
+      if (this.failures >= this.maxFailures) {
+        // already open/half-open, push/keep open
+        this.failures = this.maxFailures + 1;
+      } else {
+        this.failures++;
+      }
       this.lastFailureTime = Date.now();
     }
   }

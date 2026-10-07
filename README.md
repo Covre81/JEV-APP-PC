@@ -126,9 +126,10 @@ only on work that needs Claude**.
 
 The router can optionally divert medium-to-hard, text-only turns to Gemini using the user's Google subscription via the Antigravity CLI (`agy`) as a child process. This spares the Claude quota for work that needs it, without requiring a separate API key.
 
-- **Scope**: Text-only turns (explanations, design discussions, planning, conceptual Q&A) that do not require tool use.
+- **Scope**: Text-only turns (explanations, design discussions, planning, conceptual Q&A, code reviews) that do not require tool use.
 - **Fail-open**: It is off by default and fails open to Claude (e.g. if the CLI is missing, times out, or the tier is busy).
 - **Latency**: ~6–7 s minimum per turn. The answer arrives all at once (simulated streaming).
+- **JEV Question**: Uses the `text_answer_suffices` question to determine if the turn can be fully answered with a written reply without running tools.
 - **Isolation and Safety**: The child process runs with a router-owned `agy` profile (`HOME`/`USERPROFILE`) containing explicit deny rules for all tools (`write_file(*)`, `command(*)`, etc.). The temporary working directory is removed immediately. If the model attempts any tool use, the child process is killed instantly and the turn falls back to Claude.
 
 **Configuration (Environment variables):**
@@ -138,8 +139,20 @@ The router can optionally divert medium-to-hard, text-only turns to Gemini using
 - `GEMINI_TIER_TIMEOUT_MS=60000`
 - `GEMINI_TIER_MIN_TEXT_ONLY=0.8` (min JEV confidence that a text answer suffices)
 - `GEMINI_TIER_PRESSURE_MIN_TEXT_ONLY=0.6` (bar when Claude quota is pressured)
-- `GEMINI_TIER_FROM_PRIMARY=true` (evaluate text-only human turns even for Claude-pinned sessions)
-- `GEMINI_TIER_MAX_CONCURRENCY=1`
+- `GEMINI_TIER_FROM_PRIMARY=true` (evaluate text-only human turns even for Claude-pinned sessions. Note: this costs one extra JEV call per human turn of a Claude session)
+- `GEMINI_TIER_MAX_CONCURRENCY=1` (Queueing is skipped: if busy, it fails over to the next tier)
+- `GEMINI_TIER_MAX_PROMPT_CHARS=200000` (Max rendered transcript characters. Older messages are omitted if exceeded)
+- `GEMINI_TIER_BREAKER_FAILURES=3` (Consecutive failures before opening the circuit breaker)
+- `GEMINI_TIER_BREAKER_COOLDOWN_MS=300000` (Cooldown ms before a half-open trial)
+- `GEMINI_TIER_HOME` (Custom HOME/USERPROFILE for the isolated agy profile. Defaults to `<jevHome()>/agy-home`)
+
+**How to enable:**
+1. Ensure `agy` is installed and logged in once interactively.
+2. Set `GEMINI_TIER=on` in your `.env`.
+3. Run `npm run build`.
+4. Run `jev-router reload` (or restart the task).
+5. Check `/healthz` to verify it shows `gemini`.
+6. Watch `jev-router stats`.
 
 ## Repository structure
 

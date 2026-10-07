@@ -127,11 +127,29 @@ export function buildServer({
     });
 
     if (decision.route === 'gemini') {
-      const fallbackRoute = (decision.fallbackTier === 'trivial' || decision.fallbackTier === 'standard') ? 'cheap' : 'primary';
-      const fallbackProvider = fallbackRoute === 'cheap' ? cheapProvider : providers.primary;
+      const fallbackToPrimary = async (reason: import('../routing/router.js').RouteReason) => {
+        const routeDec: RouteDecision = { ...decision, route: 'primary', reason };
+        return relay(reply, await sendPrimary(base), routeDec, req, exchange('primary'));
+      };
+
       const doFallback = async (reason: import('../routing/router.js').RouteReason) => {
-        const routeDec: RouteDecision = { ...decision, route: fallbackRoute, reason };
-        return relay(reply, await fallbackProvider.send(base), routeDec, req, exchange(fallbackRoute));
+        if (decision.fallbackTier !== 'trivial' && decision.fallbackTier !== 'standard') {
+          return fallbackToPrimary(reason);
+        }
+
+        if (cheapHealth?.state === 'down') {
+          return fallbackToPrimary(reason);
+        }
+
+        const fbProvider = (decision.fallbackTier === 'standard' && providers.standard) ? providers.standard : providers.cheap;
+        const resFb = await fbProvider.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+        if (resFb.kind === 'response') {
+          const routeDec: RouteDecision = { ...decision, route: 'cheap', reason };
+          return relay(reply, resFb, routeDec, req, exchange('cheap'));
+        }
+
+        router.pinToPrimary(decision);
+        return fallbackToPrimary('failover:cheap-unavailable');
       };
 
       if (!providers.gemini || !geminiBreaker || geminiBreaker.state === 'open') {
@@ -144,15 +162,18 @@ export function buildServer({
 
       const res = await providers.gemini.send(base);
       if (res.kind === 'response') {
-        geminiBreaker.release(true);
+        geminiBreaker.release('success');
         return relay(reply, res, decision, req, exchange('gemini'));
       }
 
       const isRoutingMiss = res.reason === 'model asked for tools' || res.reason.startsWith('tool attempt:');
-      if (!isRoutingMiss && res.reason !== 'aborted') {
-        geminiBreaker.release(false);
+      if (res.reason === 'aborted') {
+        geminiBreaker.release('neutral');
+      } else if (isRoutingMiss) {
+        geminiBreaker.release('success'); // Or neutral, but bug says "resets the failure count; that is OK" so success is fine, or we can use neutral if we want. Wait, the bug says: "`release(true)` on routing misses ... resets the failure count; that is OK, but `'aborted'` (client hung up) must release WITHOUT counting as success or failure. Add a `release(outcome: 'success'|'failure'|'neutral')` API."
+        geminiBreaker.release('success');
       } else {
-        geminiBreaker.release(true);
+        geminiBreaker.release('failure');
       }
 
       req.log.warn({ reason: res.reason, conversation: decision.conversationKey }, 'gemini provider unavailable');

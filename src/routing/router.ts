@@ -73,7 +73,7 @@ export interface RouterOptions {
   readonly geminiFromPrimary?: boolean;
 }
 
-const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, primary: 2, gemini: 1.5 };
+const TIER_RANK: Readonly<Record<Exclude<Tier, 'gemini'>, number>> = { trivial: 0, standard: 1, primary: 2 };
 
 /**
  * Multi-provider router: decides, per conversation, between a cheap
@@ -177,6 +177,9 @@ export class Router {
     } catch (err) {
       // An unscored human turn may be structural: fail toward primary even mid-conversation.
       const classifierError = err instanceof Error ? err.message : String(err);
+      if (classifyForGemini) {
+        return resolve('primary', 'sticky', { classifierError });
+      }
       return resolve('primary', 'passthrough:classifier-failed', { classifierError });
     }
     const classifierMs = Math.round(performance.now() - started);
@@ -221,7 +224,13 @@ export class Router {
 
     if (reclassify) return resolve(proposed, proposed === 'primary' ? 'sticky' : 'quota:reclassified', extra);
     if (!sticky) {
-      const lowered = policy !== this.options.policy && TIER_RANK[proposed] < TIER_RANK[selectTier(distribution, this.options.policy)];
+      let lowered = false;
+      if (policy !== this.options.policy) {
+         const normalProposed = selectTier(distribution, this.options.policy);
+         if (normalProposed !== 'gemini' && proposed !== 'gemini') {
+            lowered = TIER_RANK[proposed] < TIER_RANK[normalProposed];
+         }
+      }
       return resolve(proposed, lowered ? 'quota:pressure' : 'classified', extra);
     }
 

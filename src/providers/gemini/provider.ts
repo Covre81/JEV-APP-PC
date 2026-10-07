@@ -1,9 +1,9 @@
 import { Readable } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 import type { Provider, ProviderRequest, ProviderResult } from '../provider.js';
 import { runAgy, type AgyRunnerOptions, type SpawnAgy } from './agy-runner.js';
 import { renderGeminiPrompt } from './prompt.js';
 import { sseEvent } from '../openai/sse.js';
-import { CircuitBreaker } from './breaker.js';
 
 export class GeminiCliProvider implements Provider {
   readonly name = 'gemini-cli';
@@ -49,20 +49,26 @@ export class GeminiCliProvider implements Provider {
     }
 
     const usage = res.usage;
+    const msgId = `msg_jev_${randomUUID()}`;
 
-    const headers = {
-      'content-type': req.body.stream ? 'text/event-stream' : 'application/json',
-      'x-claude-code-provider': 'gemini-cli'
+    const headers: Record<string, string> = {
+      'content-type': req.body.stream ? 'text/event-stream' : 'application/json'
     };
 
     if (req.body.stream) {
+      headers['cache-control'] = 'no-cache';
+      const model = this.opts.model;
+
       async function* generateStream() {
         yield sseEvent('message_start', {
           message: {
-            id: `msg_jev_gemini_${Date.now()}`,
+            id: msgId,
             type: 'message',
             role: 'assistant',
-            model: req.body!.model,
+            model: model,
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
             usage: { input_tokens: usage.inputTokens, output_tokens: 0 }
           }
         });
@@ -98,10 +104,10 @@ export class GeminiCliProvider implements Provider {
       };
     } else {
       const responseJson = {
-        id: `msg_jev_gemini_${Date.now()}`,
+        id: msgId,
         type: 'message',
         role: 'assistant',
-        model: req.body.model,
+        model: this.opts.model,
         content: [{ type: 'text', text: text }],
         stop_reason: 'end_turn',
         stop_sequence: null,

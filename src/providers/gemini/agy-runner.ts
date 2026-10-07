@@ -23,7 +23,8 @@ export async function runAgy(
   spawnFn: SpawnAgy = spawn
 ): Promise<AgyResult> {
   const cwd = await mkdtemp(join(tmpdir(), 'agy-'));
-  
+  let conversationId: string | undefined;
+
   try {
     const printTimeout = Math.ceil(opts.timeoutMs / 1000) + 5;
     const args = [
@@ -35,70 +36,96 @@ export async function runAgy(
       '--print='
     ];
 
+    const childEnv = { ...process.env, USERPROFILE: opts.home, HOME: opts.home };
+    const stripKeys = [
+      'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_API_KEY',
+      'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_CLOUD_PROJECT'
+    ];
+    for (const key of Object.keys(childEnv)) {
+      if (stripKeys.includes(key.toUpperCase())) {
+        delete childEnv[key];
+      }
+    }
+
     const child = spawnFn(opts.bin, args, {
       cwd,
-      env: { ...process.env, USERPROFILE: opts.home, HOME: opts.home },
+      env: childEnv,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
-    const timeout = setTimeout(() => {
-      killTree(child.pid!);
-    }, opts.timeoutMs);
+    child.stdin?.on('error', () => {});
+    child.stdout?.on('error', () => {});
+    child.stderr?.on('error', () => {});
 
-    const abortHandler = () => {
-      killTree(child.pid!);
-    };
-    opts.signal?.addEventListener('abort', abortHandler);
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      opts.signal?.removeEventListener('abort', abortHandler);
-    };
-
-    child.stdin!.write(JSON.stringify({
-      event: 'user',
-      message: { role: 'user', content: prompt }
-    }) + '\n');
-    child.stdin!.end();
-
+    let isSettled = false;
+    let finalResult: any = undefined;
+    let toolAttempted: string | false = false;
     let stdoutBuffer = '';
     let textDelta = '';
-    let finalResult: any = undefined;
-    let toolAttempted = false;
-
-    child.stdout!.on('data', (chunk) => {
-      stdoutBuffer += chunk.toString('utf8');
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const ev = JSON.parse(line);
-          if (ev.event === 'step_update' && ev.step_update) {
-            if (ev.step_update.step_type === 'tool') {
-              toolAttempted = ev.step_update.tool_name;
-              killTree(child.pid!);
-            } else if (ev.step_update.step_type === 'agent_response' && ev.step_update.text_delta) {
-              textDelta += ev.step_update.text_delta;
-            }
-          } else if (ev.event === 'result' && ev.result) {
-            finalResult = ev.result;
-          }
-        } catch {}
-      }
-    });
 
     return await new Promise<AgyResult>((resolve) => {
+      const abortHandler = () => {
+        if (child.pid !== undefined) killTree(child.pid);
+        settle({ ok: false, reason: 'aborted' });
+      };
+
+      const settle = (result: AgyResult) => {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(timeout);
+        opts.signal?.removeEventListener('abort', abortHandler);
+        resolve(result);
+      };
+
+      const timeout = setTimeout(() => {
+        if (child.pid !== undefined) killTree(child.pid);
+        settle({ ok: false, reason: 'timeout' });
+      }, opts.timeoutMs);
+
+      if (opts.signal?.aborted) return settle({ ok: false, reason: 'aborted' });
+      opts.signal?.addEventListener('abort', abortHandler);
+
+      try {
+        child.stdin!.write(JSON.stringify({
+          event: 'user',
+          message: { role: 'user', content: prompt }
+        }) + '\n');
+        child.stdin!.end();
+      } catch (err) {
+        // Handle EPIPE etc if write fails immediately
+      }
+
+      child.stdout!.on('data', (chunk) => {
+        stdoutBuffer += chunk.toString('utf8');
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const ev = JSON.parse(line);
+            if (ev.conversation_id && typeof ev.conversation_id === 'string' && /^[A-Za-z0-9-]+$/.test(ev.conversation_id)) {
+              conversationId = ev.conversation_id;
+            }
+            if (ev.event === 'step_update' && ev.step_update) {
+              if (ev.step_update.step_type === 'tool') {
+                toolAttempted = ev.step_update.tool_name || 'unknown';
+                if (child.pid !== undefined) killTree(child.pid);
+              } else if (ev.step_update.step_type === 'agent_response' && ev.step_update.text_delta) {
+                textDelta += ev.step_update.text_delta;
+              }
+            } else if (ev.event === 'result' && ev.result) {
+              finalResult = ev.result;
+            }
+          } catch {}
+        }
+      });
+
       child.on('error', (err) => {
-        cleanup();
-        resolve({ ok: false, reason: err.message });
+        settle({ ok: false, reason: `spawn failed: ${err.message}` });
       });
 
       child.on('close', (code) => {
-        cleanup();
-        
-        // Ensure remaining buffer is parsed
         if (stdoutBuffer.trim()) {
            try {
               const ev = JSON.parse(stdoutBuffer);
@@ -107,31 +134,32 @@ export async function runAgy(
         }
 
         if (toolAttempted) {
-          return resolve({ ok: false, reason: `tool attempt: ${toolAttempted}` });
+          return settle({ ok: false, reason: `tool attempt: ${toolAttempted}` });
         }
         if (opts.signal?.aborted) {
-          return resolve({ ok: false, reason: 'aborted' });
+          return settle({ ok: false, reason: 'aborted' });
         }
         if (code !== 0) {
+          const reasonMsg = (finalResult && finalResult.status === 'ERROR' && finalResult.error) ? finalResult.error : '';
           if (finalResult && finalResult.status === 'ERROR') {
-             return resolve({ ok: false, reason: finalResult.error || `exit ${code}` });
+             return settle({ ok: false, reason: `status ERROR: ${reasonMsg}` });
           }
-          return resolve({ ok: false, reason: `exit ${code}` });
+          return settle({ ok: false, reason: `exit ${code}` });
         }
         
         if (!finalResult) {
-          return resolve({ ok: false, reason: 'no result event' });
+          return settle({ ok: false, reason: 'no result event' });
         }
         if (finalResult.status !== 'SUCCESS') {
-          return resolve({ ok: false, reason: finalResult.error || 'status not SUCCESS' });
+          return settle({ ok: false, reason: `status ${finalResult.status}: ${finalResult.error || ''}`.trim() });
         }
         
         const responseText = (finalResult.response || textDelta).trim();
         if (!responseText) {
-          return resolve({ ok: false, reason: 'empty response' });
+          return settle({ ok: false, reason: 'empty response' });
         }
         
-        resolve({
+        settle({
           ok: true,
           text: finalResult.response || textDelta,
           usage: {
@@ -143,8 +171,24 @@ export async function runAgy(
     });
   } finally {
     try { await rm(cwd, { recursive: true, force: true }); } catch {}
-    try { await rm(join(opts.home, '.gemini', 'antigravity-cli', 'brain'), { recursive: true, force: true }); } catch {}
-    try { await rm(join(opts.home, '.gemini', 'antigravity-cli', 'annotations'), { recursive: true, force: true }); } catch {}
+    if (conversationId) {
+      const baseDir = join(opts.home, '.gemini', 'antigravity-cli');
+      try { await rm(join(baseDir, 'brain', conversationId), { recursive: true, force: true }); } catch {}
+      try { await rm(join(baseDir, 'annotations', `${conversationId}.pbtxt`), { force: true }); } catch {}
+      // agy sometimes writes files starting with conversationId in conversations/
+      // Wait, there is no direct wildcard `rm`, we can just read the dir if needed, but the bug says "delete conversations/<conversation_id>* files if present"
+      // Node 22 doesn't have a simple wildcard `rm`. Let's just delete the specific known prefixes or use readdir.
+      try {
+        const fs = await import('node:fs/promises');
+        const convDir = join(baseDir, 'conversations');
+        const files = await fs.readdir(convDir);
+        for (const f of files) {
+          if (f.startsWith(conversationId)) {
+            await fs.rm(join(convDir, f), { force: true, recursive: true });
+          }
+        }
+      } catch {}
+    }
   }
 }
 

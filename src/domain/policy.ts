@@ -53,13 +53,16 @@ export function selectRoute(d: ComplexityDistribution & { readonly risk?: number
 
 export const tierRoute = (tier: Tier): Route => (tier === 'primary' ? 'primary' : tier === 'gemini' ? 'gemini' : 'cheap');
 
-const TIER_RANK: Readonly<Record<Tier, number>> = { trivial: 0, standard: 1, gemini: 2, primary: 3 };
+const TIER_RANK: Readonly<Record<Exclude<Tier, 'gemini'>, number>> = { trivial: 0, standard: 1, primary: 2 };
 
 /**
  * Escalate-only, across tiers: trivial → standard → primary. Bouncing down
  * would throw away the cache of the model the conversation moved up to.
  */
 export function stickyTier(current: Tier, proposed: Tier): Tier {
+  if (current === 'gemini' || proposed === 'gemini') {
+    throw new Error('gemini must not participate in stickyTier ranking');
+  }
   return TIER_RANK[proposed] > TIER_RANK[current] ? proposed : current;
 }
 
