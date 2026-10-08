@@ -9,6 +9,7 @@ import {
   hasImageDocumentOrToolChoice,
   type MessagesBody,
 } from './messages-body.js';
+import { needsReadFirstHint } from './read-first-hint.js';
 import type { QuotaLevel } from '../quota.js';
 import type { TtlLruStore } from './session-store.js';
 
@@ -22,10 +23,12 @@ export type RouteReason =
   | 'escalated:standard'
   | 'escalated:context'
   | 'failover:cheap-unavailable'
+  | 'failover:standard-unavailable'
   | 'skipped:cheap-unhealthy'
   | 'pinned:compaction'
   | 'quota:pressure'
   | 'quota:reclassified'
+  | 'read-first:standard'
   | 'failover:primary-rate-limited'
   | 'gemini:text-only'
   | 'gemini:text-only:pressure'
@@ -71,6 +74,8 @@ export interface RouterOptions {
   readonly pressurePolicy?: { readonly minCheapProbability: number; readonly minStandardProbability: number };
   readonly geminiPolicy?: import('../domain/policy.js').GeminiPolicyOptions;
   readonly geminiFromPrimary?: boolean;
+  /** route first open-ended project-state turns to the standard tier */
+  readonly readFirstStandard?: boolean;
 }
 
 const TIER_RANK: Readonly<Record<Exclude<Tier, 'gemini'>, number>> = { trivial: 0, standard: 1, primary: 2 };
@@ -187,13 +192,15 @@ export class Router {
     // The risk veto runs inside selectTier, before any bar: no quota level moves a risky turn.
     const proposed = selectTier(distribution, policy);
     const extra = { distribution, classifierMs };
+    
+    const needsReadFirst = this.options.readFirstStandard === true && needsReadFirstHint(ctx.body);
 
     let isGeminiEligible = false;
     if (this.options.geminiPolicy && !hasImageDocumentOrToolChoice(ctx.body)) {
       const effectiveProposedForGemini = classifyForGemini ? 'primary' : proposed;
       isGeminiEligible = geminiEligible(distribution, effectiveProposedForGemini, this.options.geminiPolicy, level);
     }
-
+    
     if (isGeminiEligible) {
       let nextStored: Tier;
       if (fresh || stored === 'gemini') {
@@ -224,6 +231,9 @@ export class Router {
 
     if (reclassify) return resolve(proposed, proposed === 'primary' ? 'sticky' : 'quota:reclassified', extra);
     if (!sticky) {
+      if (needsReadFirst && proposed === 'trivial') {
+        return resolve('standard', 'read-first:standard', extra);
+      }
       let lowered = false;
       if (policy !== this.options.policy) {
          const normalProposed = selectTier(distribution, this.options.policy);
@@ -243,4 +253,10 @@ export class Router {
   pinToPrimary(decision: RouteDecision): void {
     if (decision.conversationKey) this.sessions.set(decision.conversationKey, 'primary');
   }
+
+  /** The standard tier was unavailable for a read-first turn: serve it on trivial. */
+  useTrivial(decision: RouteDecision): void {
+    if (decision.conversationKey) this.sessions.set(decision.conversationKey, 'trivial');
+  }
 }
+

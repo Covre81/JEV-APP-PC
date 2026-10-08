@@ -38,12 +38,25 @@ export function parseMessagesBody(raw: Buffer): MessagesBody | undefined {
 const SYSTEM_REMINDER = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
 /** Claude Code inlines hook output as `system` messages; they are not conversation turns. */
-function turns(body: MessagesBody): Message[] {
+export function turns(body: MessagesBody): Message[] {
   return body.messages.filter((m) => m.role !== 'system');
 }
 
-function hasToolResult(message: Message): boolean {
+export function hasToolResult(message: Message): boolean {
   return Array.isArray(message.content) && message.content.some((b) => b.type === 'tool_result');
+}
+
+export function humanTextOf(message: Message): string | undefined {
+  const text =
+    typeof message.content === 'string'
+      ? message.content
+      : message.content
+          .filter((b): b is typeof b & { text: string } => b.type === 'text' && typeof b.text === 'string')
+          .map((b) => b.text)
+          .join('\n');
+
+  const cleaned = text.replace(SYSTEM_REMINDER, '').trim();
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**
@@ -54,16 +67,7 @@ export function latestHumanText(body: MessagesBody): string | undefined {
   const last = turns(body).at(-1);
   if (!last || last.role !== 'user' || hasToolResult(last)) return undefined;
 
-  const text =
-    typeof last.content === 'string'
-      ? last.content
-      : last.content
-          .filter((b): b is typeof b & { text: string } => b.type === 'text' && typeof b.text === 'string')
-          .map((b) => b.text)
-          .join('\n');
-
-  const cleaned = text.replace(SYSTEM_REMINDER, '').trim();
-  return cleaned.length > 0 ? cleaned : undefined;
+  return humanTextOf(last);
 }
 
 export function isFreshConversation(body: MessagesBody): boolean {

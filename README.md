@@ -126,8 +126,11 @@ only on work that needs Claude**.
 ### Read-first hint (`CHEAP_READ_FIRST_HINT`)
 
 On the cheap route, the model might try to guess the project's state instead of reading its files.
-When `CHEAP_READ_FIRST_HINT=true` (the default), if a session's first turn is a broad question about what to do next (e.g. "what next?", "onde paramos?"), the router appends a short instruction to the system prompt telling the cheap model to read project files (like `README`, `CLAUDE.md` or plan documents) with its tools before answering.
-- **When it fires:** only on the cheap/standard tiers, only on a fresh conversation's first turn, only when the user's prompt matches an open-ended "what next" pattern, and only if file-reading tools are available.
+When `CHEAP_READ_FIRST_HINT=true` (the default), if a session's first turn is a broad question about what to do next (e.g. "what next?", "onde paramos?"), the router appends a system-reminder block at the end of the last user message instructing the model to use its file tools (Glob/LS, Read) on project files (README, CLAUDE.md, plan documents) rather than guessing or inventing details.
+- **When it fires:** only on a fresh conversation's first turn, when the user's prompt matches an open-ended "what next" pattern, and file-reading tools are available. The hint is never sent to Claude or Gemini.
+- **Placement:** The reminder block is appended to the last user message, wrapped in `<system-reminder>` tags. (Note: the `gpt-oss` model receives reasoning in a separate field which the router drops, so any reasoning-like text the client sees was generated directly in the answer by the model).
+- **Standard Tier Promotion (`CHEAP_READ_FIRST_STANDARD`):** By default (`true`), these read-first turns are promoted to the standard tier model (e.g. `gemma4:31b-cloud`), avoiding the trivial tier. If the standard tier fails, or is disabled (`off`), it falls back to the trivial tier model.
+- **Follow-up reminder:** On the trivial and standard tiers, if the model replies with a tool call (like LS) instead of reading a file, the next tool-result turn carries a follow-up reminder to read the files. This fires until a file has been read, for at most 6 assistant turns, and is never sent to Claude or Gemini.
 - **How to turn it off:** set `CHEAP_READ_FIRST_HINT=false` in your `.env`.
 
 ## Gemini tier (Antigravity CLI subscription)

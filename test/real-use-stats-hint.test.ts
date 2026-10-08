@@ -241,19 +241,22 @@ describe('Stats and Hint improvements', () => {
     const cString = structuredClone(bStringSystem);
     const resultString = withReadFirstHint(bStringSystem);
     assert.deepEqual(bStringSystem, cString);
-    assert.ok(typeof resultString.system === 'string' && resultString.system.includes('Before answering'));
+    assert.ok(Array.isArray(resultString.messages[0]!.content));
+    assert.ok((resultString.messages[0]!.content as any)[1].text.includes('<system-reminder>'));
     
     const bArraySystem = MessagesBody.parse({ model: 'x', messages: [{ role: 'user', content: 'hi' }], system: [{ type: 'text', text: 'A' }] });
     const cArray = structuredClone(bArraySystem);
     const resultArray = withReadFirstHint(bArraySystem);
     assert.deepEqual(bArraySystem, cArray);
-    assert.ok(Array.isArray(resultArray.system) && resultArray.system.length === 2);
+    assert.ok(Array.isArray(resultArray.messages[0]!.content));
+    assert.ok((resultArray.messages[0]!.content as any)[1].text.includes('<system-reminder>'));
     
     const bNoSystem = MessagesBody.parse({ model: 'x', messages: [{ role: 'user', content: 'hi' }] });
     const cNoSystem = structuredClone(bNoSystem);
     const resultNoSystem = withReadFirstHint(bNoSystem);
     assert.deepEqual(bNoSystem, cNoSystem);
-    assert.ok(typeof resultNoSystem.system === 'string' && resultNoSystem.system.includes('Before answering'));
+    assert.ok(Array.isArray(resultNoSystem.messages[0]!.content));
+    assert.ok((resultNoSystem.messages[0]!.content as any)[1].text.includes('<system-reminder>'));
   });
 
   describe('6) e2e with a stub classifier', () => {
@@ -344,7 +347,8 @@ describe('Stats and Hint improvements', () => {
       await res.body.text();
       assert.equal(res.statusCode, 200);
       assert.equal(cheapLog.length, 1);
-      assert.ok(cheapLog[0]!.body.messages[0].content.includes('Before answering'), 'Cheap provider gets the hint in system prompt');
+      const msgs = cheapLog[0]!.body.messages;
+      assert.ok(msgs[msgs.length - 1].content.includes('Before you reply, use your file tools yourself'), 'Cheap provider gets the hint in last user message');
       assert.equal(anthropicLog.length, 0);
     });
 
@@ -361,7 +365,8 @@ describe('Stats and Hint improvements', () => {
       await res.body.text();
       assert.equal(res.statusCode, 200);
       assert.equal(cheapLog.length, 1);
-      assert.ok(!cheapLog[0]!.body.messages[0].content.includes('Before answering'));
+      const msgs = cheapLog[0]!.body.messages;
+      assert.ok(!msgs[msgs.length - 1].content.includes('<system-reminder>'));
     });
 
     it('when cheap fails, anthropic receives body without the hint', async () => {
@@ -385,7 +390,7 @@ describe('Stats and Hint improvements', () => {
       const aBody = anthropicLog[0]!.body;
       assert.equal(aBody.system, 'foo', 'Anthropic system prompt remains unchanged');
       assert.ok(anthropicLog[0]!.raw.includes('"system":"foo"'), 'Anthropic raw bytes do not contain the hint');
-      assert.ok(!anthropicLog[0]!.raw.includes('Before answering'));
+      assert.ok(!anthropicLog[0]!.raw.includes('<system-reminder>'));
     });
 
     it('2) inspection miss', async () => {
