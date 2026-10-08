@@ -614,6 +614,15 @@ If matching context items are found and `CONTEXT_MODE=inject`, the hook outputs 
 ```
 If no items are found, or the mode is set to `shadow` or `off`, the output to `stdout` remains completely empty.
 
+### Time budget and skips
+
+Claude Code kills a `UserPromptSubmit` hook after its configured timeout (8 s here) and shows a warning, so the hook always fails open well before that:
+
+- `CONTEXT_HOOK_BUDGET_MS` (default `5000`, clamped to 1000-7000) is the whole hook's budget, stdin included. When it runs out, the hook writes one line to stderr and exits 0 with nothing on stdout.
+- The pipeline's own deadline is `min(CONTEXT_TIMEOUT_MS, budget - 1500 ms)`, so it normally gives up first and still records the run as `timeout`.
+- When a JEV request fails (for example HTTP 529 or 503 while the API is overloaded), the requests still in flight are aborted at once, and the process exits even if the API never answers them. Before this fix such a request kept the hook alive for up to about 30 s.
+- A `cwd` that is not a project (missing, a filesystem root, the home directory, or no `.git`, `.ai-memory.toml`, `graphify-out`, `package.json` or `CLAUDE.md` in it or an ancestor below home) is recorded as `skipped_cwd` without calling ai-memory, the graph scan or JEV.
+
 ### Bench history
 
 Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MODEL`, and add a row.

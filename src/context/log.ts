@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { inTransaction } from '../telemetry/db.js';
 
-export type ContextOutcome = 'ok' | 'skipped_origin' | 'config_error' | 'partial' | 'source_error' | 'jev_error' | 'timeout';
+export type ContextOutcome = 'ok' | 'skipped_origin' | 'skipped_cwd' | 'config_error' | 'partial' | 'source_error' | 'jev_error' | 'timeout';
 
 export interface ContextRunInput {
   readonly sessionId: string;

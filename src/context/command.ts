@@ -8,6 +8,12 @@ const HookConfigSchema = z.looseObject({
   CONTEXT_MAX_ITEMS: z.coerce.number().int().default(5),
   CONTEXT_MAX_CHARS: z.coerce.number().int().default(1500),
   CONTEXT_TIMEOUT_MS: z.coerce.number().int().default(3000),
+  CONTEXT_HOOK_BUDGET_MS: z.unknown().transform(val => {
+    if (val === undefined) return 5000;
+    const num = Number(val);
+    if (isNaN(num)) return 5000;
+    return Math.max(1000, Math.min(7000, Math.floor(num)));
+  }).default(5000),
   CONTEXT_GRAPH_ROOT: z.string().optional(),
   CONTEXT_AI_MEMORY_BIN: z.string().default('ai-memory'),
   TYPESAFE_API_KEY: z.string().optional(),
@@ -15,10 +21,21 @@ const HookConfigSchema = z.looseObject({
   JEV_MODEL: z.string().default('jev-latest'),
 });
 
-export async function runContextHook(explicitEnvFile?: string): Promise<number> {
+export async function runContextHook(explicitEnvFile?: string, exitFn: (code: number) => void = process.exit): Promise<number> {
+  let watchdog: NodeJS.Timeout | undefined;
   try {
     // 1. Parse config (using custom schema)
     const rawConfig = HookConfigSchema.parse(process.env);
+    const budgetMs = rawConfig.CONTEXT_HOOK_BUDGET_MS;
+    let stdoutWritten = false;
+
+    watchdog = setTimeout(() => {
+      if (!stdoutWritten) {
+        process.stderr.write(`[context] hook budget of ${budgetMs} ms exceeded, exiting without context\n`);
+        exitFn(0);
+      }
+    }, budgetMs);
+    watchdog.unref();
 
     const config: PipelineConfig = {
       mode: rawConfig.CONTEXT_MODE,
@@ -26,7 +43,7 @@ export async function runContextHook(explicitEnvFile?: string): Promise<number> 
       lOther: rawConfig.CONTEXT_L_OTHER,
       maxItems: rawConfig.CONTEXT_MAX_ITEMS,
       maxChars: rawConfig.CONTEXT_MAX_CHARS,
-      timeoutMs: rawConfig.CONTEXT_TIMEOUT_MS,
+      timeoutMs: Math.min(rawConfig.CONTEXT_TIMEOUT_MS, Math.max(500, budgetMs - 1500)),
       graphRoot: rawConfig.CONTEXT_GRAPH_ROOT,
       aiMemoryBin: rawConfig.CONTEXT_AI_MEMORY_BIN,
       apiKey: rawConfig.TYPESAFE_API_KEY,
@@ -63,10 +80,11 @@ export async function runContextHook(explicitEnvFile?: string): Promise<number> 
 
     // 4. Output to stdout and write status/diagnostics to stderr if needed
     if (result.stdout) {
+      stdoutWritten = true;
       process.stdout.write(result.stdout);
     }
 
-    if (result.outcome !== 'ok' && result.outcome !== 'skipped_origin') {
+    if (result.outcome !== 'ok' && result.outcome !== 'skipped_origin' && result.outcome !== 'skipped_cwd') {
       process.stderr.write(`[context] Pipeline completed with outcome: ${result.outcome}${result.error ? `: ${result.error}` : ''}\n`);
     }
 
@@ -74,5 +92,7 @@ export async function runContextHook(explicitEnvFile?: string): Promise<number> 
   } catch (err: any) {
     process.stderr.write(`[context] Uncaught pipeline error: ${err.message}\n`);
     return 0; // Always exit 0 as per guidelines
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
   }
 }

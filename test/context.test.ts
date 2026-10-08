@@ -2,10 +2,10 @@ import assert from 'node:assert';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, parse, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
-import { describe, before, after, it } from 'node:test';
+import { describe, before, after, afterEach, it } from 'node:test';
 import { tmpdir } from 'node:os';
 import { openTelemetryDb } from '../src/telemetry/db.js';
 
@@ -19,6 +19,7 @@ import { scoreCandidates } from '../src/context/select.js';
 import type { Candidate } from '../src/context/select.js';
 import { recordContextRun } from '../src/context/log.js';
 import { runPipeline, type PipelineConfig } from '../src/context/pipeline.js';
+import { isProjectDir } from '../src/context/project-dir.js';
 import { MIGRATIONS } from '../src/telemetry/schema.js';
 
 /** Index of the migration that created context_runs (the layout 62d6389 shipped). */
@@ -526,6 +527,226 @@ describe('context-cli.e2e', () => {
       const r = await hook(junk);
       assert.strictEqual(r.code, 0, junk);
       assert.strictEqual(r.stdout, '', junk);
+    }
+  });
+
+  describe('529 and hanging requests tests', () => {
+    let fake529: { server: Server; url: string };
+    let reqs: IncomingMessage[] = [];
+    let resolveWait: () => void;
+    let waitPromise = new Promise<void>((r) => (resolveWait = r));
+    let answered = false;
+
+    before(async () => {
+      fake529 = await listen(async (req, res) => {
+        reqs.push(req);
+        if (reqs.length >= 2) resolveWait();
+        await waitPromise;
+        if (!answered) {
+          answered = true;
+          res.writeHead(529, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Overloaded' }));
+        } else {
+          await new Promise(() => {}); // hang forever
+        }
+      });
+      writeGraph(dir, 'proj');
+      // A different graph (identical ones are loaded once), so rankCommunities sends two requests in parallel.
+      writeGraph(dir, 'other', JSON.stringify({ ...GRAPH, nodes: GRAPH.nodes.map((n) => ({ ...n, label: `other${n.label}` })) }));
+    });
+
+    afterEach(() => {
+      reqs = [];
+      answered = false;
+      waitPromise = new Promise<void>((r) => (resolveWait = r));
+    });
+
+    after(() => {
+      fake529.server.closeAllConnections();
+      fake529.server.close();
+    });
+
+    it('pipeline cancels all parallel in-flight JEV requests when one fails (529)', async () => {
+      // Record into the test database, never into the real one.
+      process.env['TELEMETRY_DB_PATH'] = dbFile;
+      let res: Awaited<ReturnType<typeof runPipeline>>;
+      try {
+        res = await runPipeline(
+          { prompt: 'hello', session_id: 'pipeline-529', cwd: join(dir, 'proj') },
+          baseConfig(fake529.url, { graphRoot: dir, timeoutMs: 5000 })
+        );
+      } finally {
+        delete process.env['TELEMETRY_DB_PATH'];
+      }
+      assert.strictEqual(res.outcome, 'jev_error');
+      assert.match(res.error ?? '', /JEV HTTP 529/);
+
+      const unansweredReqs = reqs.slice(1);
+      assert.ok(unansweredReqs.length > 0);
+      
+      const closes = unansweredReqs.map((req) => 
+        new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('Socket did not close in time')), 1000);
+          req.socket.once('close', () => {
+            clearTimeout(timeout);
+            resolve();
+          });
+        })
+      );
+      await Promise.all(closes);
+    });
+
+    it('cli e2e: 529 plus hanging fake exits under 3000ms', async () => {
+      const start = performance.now();
+      const r = await hook(payload('cli-529'), { CONTEXT_MODE: 'inject', JEV_API_URL: fake529.url });
+      const elapsed = performance.now() - start;
+      assert.strictEqual(r.code, 0);
+      assert.strictEqual(r.stdout, '');
+      assert.ok(elapsed < 3000);
+    });
+  });
+
+  describe('timeouts and watchdog', () => {
+    let fakeHanging: { server: Server; url: string };
+    before(async () => {
+      fakeHanging = await listen(async (req, res) => {
+        await new Promise(() => {}); // never answers
+      });
+    });
+    after(() => {
+      fakeHanging.server.closeAllConnections();
+      fakeHanging.server.close();
+    });
+
+    it('cli e2e: never answers, with long timeout and short budget', async () => {
+      const start = performance.now();
+      const r = await hook(payload('cli-timeout'), {
+        CONTEXT_MODE: 'inject',
+        JEV_API_URL: fakeHanging.url,
+        CONTEXT_TIMEOUT_MS: '20000',
+        CONTEXT_HOOK_BUDGET_MS: '2000'
+      });
+      const elapsed = performance.now() - start;
+      assert.strictEqual(r.code, 0);
+      assert.strictEqual(r.stdout, '');
+      assert.ok(elapsed < 3500);
+
+      const db = new DatabaseSync(dbFile);
+      const row = db.prepare(`SELECT outcome FROM context_runs WHERE session_id = 'cli-timeout' ORDER BY id DESC LIMIT 1`).get() as { outcome: string };
+      db.close();
+      assert.strictEqual(row?.outcome, 'timeout');
+    });
+
+    it('cli e2e: watchdog kicks in when stdin is held open', async () => {
+      const start = performance.now();
+      
+      const r = await new Promise<{ code: number | null; stdout: string; stderr: string }>((done) => {
+        const proc = spawn(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'context', '--env', envFile], {
+          env: { ...process.env, TELEMETRY_DB_PATH: dbFile, CONTEXT_HOOK_BUDGET_MS: '1000' },
+        });
+        let stdout = '';
+        let stderr = '';
+        proc.stdout.on('data', (c) => (stdout += c));
+        proc.stderr.on('data', (c) => (stderr += c));
+        proc.on('close', (code) => done({ code, stdout, stderr }));
+        // never end stdin
+      });
+
+      const elapsed = performance.now() - start;
+      assert.strictEqual(r.code, 0);
+      assert.strictEqual(r.stdout, '');
+      assert.ok(elapsed < 3000);
+      assert.match(r.stderr, /hook budget of 1000 ms exceeded/);
+    });
+  });
+});
+
+describe('isProjectDir', () => {
+  let tempHome: string;
+
+  before(() => {
+    tempHome = mkdtempSync(join(tmpdir(), 'jev-ctx-home-'));
+  });
+
+  after(() => {
+    rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it('correctly identifies project directories and skips others', () => {
+    const projDir = join(tempHome, 'my-proj');
+    const subDir = join(projDir, 'src', 'sub');
+    mkdirSync(subDir, { recursive: true });
+    
+    // no marker: false
+    assert.strictEqual(isProjectDir(subDir, tempHome), false);
+
+    // marker in cwd: true
+    writeFileSync(join(subDir, '.git'), '');
+    assert.strictEqual(isProjectDir(subDir, tempHome), true);
+    rmSync(join(subDir, '.git'));
+
+    // marker only in ancestor below home: true
+    writeFileSync(join(projDir, 'package.json'), '{}');
+    assert.strictEqual(isProjectDir(subDir, tempHome), true);
+
+    // a dir with no marker: false
+    const otherDir = join(tempHome, 'other');
+    mkdirSync(otherDir);
+    assert.strictEqual(isProjectDir(otherDir, tempHome), false);
+
+    // home itself: false
+    assert.strictEqual(isProjectDir(tempHome, tempHome), false);
+
+    // missing path: false
+    assert.strictEqual(isProjectDir(join(tempHome, 'does-not-exist'), tempHome), false);
+
+    // filesystem root: false
+    const root = parse(tempHome).root;
+    assert.strictEqual(isProjectDir(root, tempHome), false);
+  });
+});
+
+describe('pipeline skipped_cwd', () => {
+  let tempDir: string;
+  let dbFile: string;
+
+  before(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'jev-ctx-skipped-cwd-'));
+    dbFile = join(tempDir, 'telemetry.db');
+    process.env['TELEMETRY_DB_PATH'] = dbFile;
+    openTelemetryDb(dbFile).close();
+  });
+
+  after(() => {
+    delete process.env['TELEMETRY_DB_PATH'];
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('yields skipped_cwd outcome and zero requests when cwd is not a project', async () => {
+    let reqs = 0;
+    const fake = await listen((req, res) => {
+      reqs++;
+      res.end();
+    });
+
+    const cwd = join(tempDir, 'no-marker-dir');
+    mkdirSync(cwd);
+
+    try {
+      const res = await runPipeline(
+        { prompt: 'hello', session_id: 'sess-skipped-cwd', cwd },
+        baseConfig(fake.url)
+      );
+      assert.strictEqual(res.outcome, 'skipped_cwd');
+      assert.strictEqual(res.stdout, '');
+      assert.strictEqual(reqs, 0);
+
+      const db = new DatabaseSync(dbFile);
+      const row = db.prepare(`SELECT outcome FROM context_runs WHERE session_id = 'sess-skipped-cwd'`).get() as { outcome: string };
+      db.close();
+      assert.strictEqual(row?.outcome, 'skipped_cwd');
+    } finally {
+      fake.server.close();
     }
   });
 });

@@ -130,7 +130,13 @@ async function main(argv: string[]): Promise<number> {
     case 'context': {
       const { runContextHook } = await import('./context/command.js');
       const code = await runContextHook(values.env);
-      return code;
+      // Let Node exit on its own: a process.exit right after stdin closes trips a libuv
+      // assertion on Windows (UV_HANDLE_CLOSING). If anything still holds the loop, such as
+      // a JEV request the API never answers, force the exit shortly after; unref'd, so a
+      // clean run never waits for it.
+      process.exitCode = code;
+      setTimeout(() => process.exit(code), 250).unref();
+      return -1;
     }
     case 'statusline': {
       const [{ readSessionId, statusLine }, { readBuildInfo }] = await Promise.all([
