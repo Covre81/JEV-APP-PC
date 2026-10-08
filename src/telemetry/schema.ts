@@ -87,6 +87,9 @@ export interface RouterLog {
   readonly effort?: string | null;
   readonly cacheWrite5mTokens?: number | null;
   readonly cacheWrite1hTokens?: number | null;
+  readonly upstreamStatus?: number | null;
+  readonly upstreamRatelimitHeaders?: string | null;
+  readonly upstreamFailure?: string | null;
 }
 
 export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
@@ -174,6 +177,9 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE router_logs ADD effort text;
   ALTER TABLE router_logs ADD cache_write_5m_tokens integer;
   ALTER TABLE router_logs ADD cache_write_1h_tokens integer;`,
+  `ALTER TABLE router_logs ADD upstream_status integer;
+  ALTER TABLE router_logs ADD upstream_ratelimit_headers text;
+  ALTER TABLE router_logs ADD upstream_failure text;`,
 ];
 
 /**
@@ -198,13 +204,15 @@ export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
   request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
   fallback_triggered, tools_offered, tool_calls, inspection_miss, quota_utilization,
   cc_session_id, agent_type, prompt_id, compaction, system_hash, tools_hash, system_chars, tools_chars,
-  max_tokens, thinking_type, thinking_budget, effort, cache_write_5m_tokens, cache_write_1h_tokens
+  max_tokens, thinking_type, thinking_budget, effort, cache_write_5m_tokens, cache_write_1h_tokens,
+  upstream_status, upstream_ratelimit_headers, upstream_failure
 ) VALUES (
   @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
   @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
   @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss, @quotaUtilization,
   @ccSessionId, @agentType, @promptId, @compaction, @systemHash, @toolsHash, @systemChars, @toolsChars,
-  @maxTokens, @thinkingType, @thinkingBudget, @effort, @cacheWrite5mTokens, @cacheWrite1hTokens
+  @maxTokens, @thinkingType, @thinkingBudget, @effort, @cacheWrite5mTokens, @cacheWrite1hTokens,
+  @upstreamStatus, @upstreamRatelimitHeaders, @upstreamFailure
 )`;
 
 /** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
@@ -244,4 +252,7 @@ export const insertParams = (r: NewRouterLog) => ({
   effort: r.effort ?? null,
   cacheWrite5mTokens: r.cacheWrite5mTokens ?? null,
   cacheWrite1hTokens: r.cacheWrite1hTokens ?? null,
+  upstreamStatus: r.upstreamStatus ?? null,
+  upstreamRatelimitHeaders: r.upstreamRatelimitHeaders ?? null,
+  upstreamFailure: r.upstreamFailure ?? null,
 });

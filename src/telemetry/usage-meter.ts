@@ -23,6 +23,8 @@ export interface MeteredBody {
   sawErrorEvent(): boolean;
   /** `tool_use` blocks in the response; final once the body has ended. */
   toolCalls(): number;
+  /** True if the last non-whitespace character of the assistant text is '?' */
+  endsWithQuestion(): boolean;
   /** Resolves once metering is over (body fully parsed, or abandoned). Never rejects. */
   readonly settled: Promise<void>;
 }
@@ -60,7 +62,17 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   let errorEvent = false;
   let seen = false;
   let toolCalls = 0;
+  let lastNonSpace: string | undefined;
+
   const onToolUse = () => void toolCalls++;
+  
+  const onText = (text: string | undefined) => {
+    if (!text) return;
+    const trimmed = text.trim();
+    if (trimmed.length > 0) {
+      lastNonSpace = trimmed[trimmed.length - 1];
+    }
+  };
 
   const absorb = (u: UsageFields | undefined) => {
     if (!u || typeof u !== 'object') return;
@@ -78,8 +90,8 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   const settled = new Promise<void>((resolve) => (settle = resolve));
 
   const sink = contentType.includes('text/event-stream')
-    ? sseSink(absorb, () => (errorEvent = true), onToolUse)
-    : jsonSink(absorb, onToolUse);
+    ? sseSink(absorb, () => (errorEvent = true), onToolUse, onText)
+    : jsonSink(absorb, onToolUse, onText);
   const decoder = decompressor(contentEncoding);
   let broken = false;
   const finish = () => {
@@ -146,6 +158,7 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
     },
     sawErrorEvent: () => errorEvent,
     toolCalls: () => toolCalls,
+    endsWithQuestion: () => lastNonSpace === '?',
     settled,
   };
 }
@@ -170,18 +183,19 @@ function decompressor(encoding: string | undefined): Gunzip | Transform | undefi
 }
 
 /** Line-oriented SSE scan: only `data:` lines that can carry usage, an error or a tool call are JSON-parsed. */
-function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void, onToolUse: () => void): Sink {
-  const text = new StringDecoder('utf8');
+function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void, onToolUse: () => void, onText: (text: string | undefined) => void): Sink {
+  const textDecoder = new StringDecoder('utf8');
   let pending = '';
   const line = (raw: string) => {
     if (!raw.startsWith('data:')) return;
     const data = raw.slice(5).trim();
-    if (!data.includes('"usage"') && !data.includes('"error"') && !data.includes('"tool_use"')) return;
+    if (!data.includes('"usage"') && !data.includes('"error"') && !data.includes('"tool_use"') && !data.includes('"text_delta"') && !data.includes('"text"')) return;
     let event: {
       type?: unknown;
       usage?: UsageFields;
       message?: { usage?: UsageFields };
-      content_block?: { type?: unknown };
+      content_block?: { type?: unknown, text?: string };
+      delta?: { type?: unknown, text?: string };
     };
     try {
       event = JSON.parse(data);
@@ -192,6 +206,8 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
     else if (event.type === 'message_delta') absorb(event.usage);
     else if (event.type === 'error') onError();
     else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') onToolUse();
+    else if (event.type === 'content_block_start' && event.content_block?.type === 'text') onText(event.content_block?.text);
+    else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') onText(event.delta?.text);
   };
   const scan = (chunk: string) => {
     pending += chunk;
@@ -202,16 +218,16 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
     }
   };
   return {
-    write: (chunk) => scan(text.write(chunk)),
+    write: (chunk) => scan(textDecoder.write(chunk)),
     end: () => {
-      scan(text.end());
+      scan(textDecoder.end());
       if (pending) line(pending);
       pending = '';
     },
   };
 }
 
-function jsonSink(absorb: (u: UsageFields | undefined) => void, onToolUse: () => void): Sink {
+function jsonSink(absorb: (u: UsageFields | undefined) => void, onToolUse: () => void, onText: (text: string | undefined) => void): Sink {
   const parts: Buffer[] = [];
   let size = 0;
   return {
@@ -224,7 +240,12 @@ function jsonSink(absorb: (u: UsageFields | undefined) => void, onToolUse: () =>
       const parsed = JSON.parse(Buffer.concat(parts).toString('utf8')) as { usage?: UsageFields; content?: unknown };
       absorb(parsed.usage);
       if (Array.isArray(parsed.content)) {
-        for (const block of parsed.content) if ((block as { type?: unknown } | null)?.type === 'tool_use') onToolUse();
+        for (const block of parsed.content) {
+          if ((block as { type?: unknown } | null)?.type === 'tool_use') onToolUse();
+          if ((block as { type?: unknown, text?: unknown } | null)?.type === 'text' && typeof (block as any).text === 'string') {
+            onText((block as any).text);
+          }
+        }
       }
     },
   };

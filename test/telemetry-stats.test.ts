@@ -68,9 +68,9 @@ describe('telemetry → stats', () => {
   it('counts cheap answers that ignored the tools they were offered (inspection miss)', async () => {
     const db = openTelemetryDb(':memory:');
     const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
-    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 0, inspectionMiss: true }));
-    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 2, inspectionMiss: false }));
-    sink.record(row({ finalProvider: 'anthropic', toolsOffered: 20, toolCalls: 0 }));
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 0, inspectionMiss: true, humanPromptHash: 'h1' }));
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 2, inspectionMiss: false, humanPromptHash: 'h2' }));
+    sink.record(row({ finalProvider: 'anthropic', toolsOffered: 20, toolCalls: 0, humanPromptHash: 'h3' }));
     sink.flush();
 
     const stats = computeStats(db);

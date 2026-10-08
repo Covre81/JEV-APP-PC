@@ -61,8 +61,7 @@ only on work that needs Claude**.
 4. **Failure only ever moves work up to Anthropic.**
    - The request can't be translated (images, documents, server tools): primary.
    - The request is larger than the cheap model's context budget: primary.
-   - The cheap provider returns an error or times out: primary, and the
-     conversation is pinned there.
+   - The cheap provider returns an error or times out: it is retried once quickly (`CHEAP_RETRY=true`), then falls back to primary and the conversation is pinned there.
    - The cheap provider breaks mid-stream: an Anthropic `error` event is sent,
      the conversation is pinned to primary, and Claude Code retries (2.1.289
      re-sends the turn as a non-streaming request). The pin does not cover a
@@ -82,7 +81,9 @@ only on work that needs Claude**.
      next structural turn escalates as usual.
    - When Anthropic answers 429 or 529, the request is retried on the cheap
      provider (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`, now the default): a
-     degraded answer instead of a dead session.
+     degraded answer instead of a dead session. Session-start quota probes
+     (max_tokens <= 1) are never rerouted: their 429/529 reaches Claude Code unchanged,
+     with its anthropic-ratelimit-* headers, so Claude Code can show its own quota warning.
    - The risk veto (rule 7) is checked before any of this, at every level.
 6. **Some Claude Code traffic always stays primary**
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
@@ -121,6 +122,16 @@ only on work that needs Claude**.
 - **Claude Code shows the wrong model name on the cheap route.** It keeps
   showing the model you picked. The truth is in the `x-jev-route` response
   header and the `route decision` log line.
+
+### Read-first hint (`CHEAP_READ_FIRST_HINT`)
+
+On the cheap route, the model might try to guess the project's state instead of reading its files.
+When `CHEAP_READ_FIRST_HINT=true` (the default), if a session's first turn is a broad question about what to do next (e.g. "what next?", "onde paramos?"), the router appends a system-reminder block at the end of the last user message instructing the model to use its file tools (Glob/LS, Read) on project files (README, CLAUDE.md, plan documents) rather than guessing or inventing details.
+- **When it fires:** only on a fresh conversation's first turn, when the user's prompt matches an open-ended "what next" pattern, and file-reading tools are available. The hint is never sent to Claude or Gemini.
+- **Placement:** The reminder block is appended to the last user message, wrapped in `<system-reminder>` tags. (Note: the `gpt-oss` model receives reasoning in a separate field which the router drops, so any reasoning-like text the client sees was generated directly in the answer by the model).
+- **Standard Tier Promotion (`CHEAP_READ_FIRST_STANDARD`):** By default (`true`), these read-first turns are promoted to the standard tier model (e.g. `gemma4:31b-cloud`), avoiding the trivial tier. If the standard tier fails, or is disabled (`off`), it falls back to the trivial tier model.
+- **Follow-up reminder:** On the trivial and standard tiers, if the model replies with a tool call (like LS) instead of reading a file, the next tool-result turn carries a follow-up reminder to read the files. This fires until a file has been read, for at most 6 assistant turns, and is never sent to Claude or Gemini.
+- **How to turn it off:** set `CHEAP_READ_FIRST_HINT=false` in your `.env`.
 
 ## Gemini tier (Antigravity CLI subscription)
 
@@ -440,6 +451,7 @@ Every `/v1/messages` exchange is written to `~/.jev-router/telemetry.db`
 | `latency_ms` | Request received → last byte sent to the client |
 | `fallback_triggered` | The cheap provider failed before answering and Anthropic served the request |
 | `outcome` | `ok`, `http_error`, `stream_error`, `client_abort` or `proxy_error` |
+| `upstream_status`, `upstream_ratelimit_headers`, `upstream_failure` | Status, Anthropic rate-limit header names, and failure reason from the upstream provider |
 
 **Why it adds no latency.** The response body passes through a tap that
 copies nothing and only scans `data:` lines that mention `usage` or `error`.
@@ -491,7 +503,7 @@ To respect privacy, only hashes (e.g. `system_hash`, `tools_hash`), lengths (`sy
 
 Additional `jev-router stats` flags are available for diagnostic queries:
 - `--by-class`: aggregates usage and proxy USD costs split by `x-claude-code-request-class` and `requested_model`.
-- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-row-of-session`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
+- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-turn-of-session`, `return-from-cheap`, `failover-from-cheap`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
 - `--daily`: aggregates traffic and USD costs per day, and prints overall task count, median/p90 USD per task, and the top 10 most expensive tasks.
 
 Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:

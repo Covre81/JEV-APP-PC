@@ -64,6 +64,12 @@ const Env = z
     QUOTA_PRESSURE_MIN_STANDARD: z.coerce.number().min(0).max(1).default(0.6),
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
 
+    CHEAP_RETRY: bool.default(true),
+    CHEAP_RETRY_DELAY_MS: z.coerce.number().int().min(0).default(250),
+    CHEAP_RETRY_HEADERS_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+    CHEAP_READ_FIRST_HINT: bool.default(true),
+    CHEAP_READ_FIRST_STANDARD: bool.default(true),
+
     TELEMETRY_ENABLED: bool.default(true),
     TELEMETRY_DIAGNOSTICS: bool.default(false),
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
@@ -165,6 +171,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       contextTokens: e.CHEAP_CONTEXT_TOKENS,
       timeoutMs: e.CHEAP_TIMEOUT_MS,
     },
+    cheapRetry: {
+      enabled: e.CHEAP_RETRY,
+      delayMs: e.CHEAP_RETRY_DELAY_MS,
+      headersTimeoutMs: e.CHEAP_RETRY_HEADERS_TIMEOUT_MS,
+    },
+    cheapReadFirstHint: e.CHEAP_READ_FIRST_HINT,
+    readFirstStandard: e.CHEAP_READ_FIRST_STANDARD,
     // undefined = standard tier off: level-2 work stays on the primary (the old behavior).
     cheapStandard:
       e.CHEAP_MODEL_STANDARD === 'off'

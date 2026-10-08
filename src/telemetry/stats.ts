@@ -31,6 +31,7 @@ export interface RouterStats {
   readonly inspectionMisses: number;
   /** Turns that left Claude because of the quota: quota:* reasons and the 429/529 failover. */
   readonly quotaRouted: number;
+  readonly probeRateLimited: number;
   /** Latest persisted Claude quota reading (any age). */
   readonly lastQuota: { readonly utilization: number; readonly window: string; readonly createdAt: Date } | null;
   /** Human prompts sent more than once (same sha256), and the extra sends. */
@@ -114,12 +115,17 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
 
   const quotaRouted = get<{ n: number }>(
     `SELECT count(*) AS n FROM router_logs ${inWindow}
-     AND (route_reason LIKE 'quota:%' OR route_reason = 'failover:primary-rate-limited')`,
+     AND (route_reason LIKE 'quota:%' OR (route_reason = 'failover:primary-rate-limited' AND coalesce(max_tokens, 2) > 1))`,
+  ).n;
+
+  const probeRateLimited = get<{ n: number }>(
+    `SELECT count(*) AS n FROM router_logs ${inWindow}
+     AND ((coalesce(max_tokens, 2) <= 1 AND http_status IN (429, 529)) OR (route_reason = 'failover:primary-rate-limited' AND coalesce(max_tokens, 2) <= 1))`,
   ).n;
   const lastQuota = latestQuota(db, { maxAgeMs: Infinity }) ?? null;
 
   const inspectionMisses = get<{ n: number }>(
-    `SELECT coalesce(sum(inspection_miss), 0) AS n FROM router_logs ${inWindow}`,
+    `SELECT coalesce(sum(inspection_miss), 0) AS n FROM router_logs ${inWindow} AND human_prompt_hash IS NOT NULL`,
   ).n;
 
   const repeats = all<{ sends: number }>(`
@@ -148,6 +154,7 @@ export function computeStats(db: TelemetryDb, options: StatsOptions = {}): Route
     cheapStreamErrors,
     inspectionMisses,
     quotaRouted,
+    probeRateLimited,
     lastQuota,
     repeatedPrompts: repeats.length,
     repeatedSends: repeats.reduce((n, r) => n + r.sends - 1, 0),
@@ -197,6 +204,7 @@ export function renderStats(s: RouterStats): string {
     ['  Gemini skipped (breaker/busy)', fmt(s.geminiSkipped)],
     ['Cheap answers without tool use (inspection miss)', fmt(s.inspectionMisses)],
     ['Sent cheap by quota pressure', fmt(s.quotaRouted)],
+    ['Rate-limited session probes', fmt(s.probeRateLimited)],
     [
       'Claude quota (last seen)',
       s.lastQuota ? `${Math.round(s.lastQuota.utilization * 100)}% ${s.lastQuota.window}` : '—',
@@ -326,40 +334,58 @@ export function computeCacheMisses(db: TelemetryDb, pricing: Pricing, options: S
   const rows = db.prepare(
     'SELECT id, created_at as createdAt, coalesce(cc_session_id, session_id) as session, request_class as requestClass, requested_model as requestedModel, ' +
     '       tokens_in as tokensIn, cache_write_tokens as cacheWrite, cache_write_5m_tokens as cacheWrite5m, cache_write_1h_tokens as cacheWrite1h, ' +
-    '       cc_session_id as ccSessionId, session_id as sessionId, compaction, system_hash as systemHash, tools_hash as toolsHash ' +
+    '       cc_session_id as ccSessionId, session_id as sessionId, compaction, system_hash as systemHash, tools_hash as toolsHash, ' +
+    '       final_provider as finalProvider, route_reason as routeReason, max_tokens as maxTokens ' +
     'FROM router_logs ' +
-    'WHERE (@since IS NULL OR created_at >= @since) AND final_provider = \'anthropic\' ' +
-    'ORDER BY created_at'
+    'WHERE (@since IS NULL OR created_at >= @since) AND coalesce(max_tokens, 2) > 1 ' +
+    'ORDER BY created_at, id'
   ).all({ since: params.since }) as any[];
 
-  const sessionLast = new Map<string, any>();
+  const lastAny = new Map<string, any>();
+  const lastAnthropic = new Map<string, any>();
   const misses = [];
   const summary: Record<string, { count: number, tokens: number }> = {};
   
   for (const row of rows) {
-    const sKey = row.session;
-    const prev = sKey ? sessionLast.get(sKey) : undefined;
-    if (sKey) sessionLast.set(sKey, row);
+    const sKey = row.session + '|' + row.requestClass;
+    const prevAny = row.session ? lastAny.get(sKey) : undefined;
+    const prevAnthropic = row.session ? lastAnthropic.get(sKey) : undefined;
     
-    if (!row.cacheWrite || row.cacheWrite < minWrite) continue;
-    
-    let cause = 'unknown';
-    if (!prev) cause = 'first-row-of-session';
-    else if (row.compaction || prev.compaction || row.requestClass === 'compaction' || prev.requestClass === 'compaction') cause = 'compaction';
-    else if (row.requestedModel !== prev.requestedModel) cause = 'model-switch';
-    else if (row.systemHash && prev.systemHash && row.systemHash !== prev.systemHash) cause = 'system-changed';
-    else if (row.toolsHash && prev.toolsHash && row.toolsHash !== prev.toolsHash) cause = 'tools-changed';
-    else {
-      const gap = row.createdAt - prev.createdAt;
-      if (gap > 3600000) cause = 'gap>1h';
-      else if (gap > 300000) cause = 'gap5-60m';
+    if (row.finalProvider === 'anthropic' && row.cacheWrite >= minWrite) {
+      let cause = 'unknown';
+      if (row.compaction || prevAnthropic?.compaction || row.requestClass === 'compaction' || prevAnthropic?.requestClass === 'compaction') {
+        cause = 'compaction';
+      } else if (row.routeReason?.startsWith('failover:') || row.routeReason?.startsWith('skipped:')) {
+        cause = 'failover-from-cheap';
+      } else if (prevAny && prevAny.finalProvider !== 'anthropic') {
+        cause = 'return-from-cheap';
+      } else if (!prevAny) {
+        cause = 'first-turn-of-session';
+      } else if (prevAnthropic && row.requestedModel !== prevAnthropic.requestedModel) {
+        cause = 'model-switch';
+      } else if (prevAnthropic && row.systemHash && prevAnthropic.systemHash && row.systemHash !== prevAnthropic.systemHash) {
+        cause = 'system-changed';
+      } else if (prevAnthropic && row.toolsHash && prevAnthropic.toolsHash && row.toolsHash !== prevAnthropic.toolsHash) {
+        cause = 'tools-changed';
+      } else if (prevAnthropic) {
+        const gap = row.createdAt - prevAnthropic.createdAt;
+        if (gap > 3600000) cause = 'gap>1h';
+        else if (gap > 300000) cause = 'gap5-60m';
+      }
+      
+      misses.push({ ...row, cause });
+      if (!summary[cause]) summary[cause] = { count: 0, tokens: 0 };
+      const s = summary[cause]!;
+      s.count++;
+      s.tokens += row.cacheWrite;
     }
     
-    misses.push({ ...row, cause });
-    if (!summary[cause]) summary[cause] = { count: 0, tokens: 0 };
-    const s = summary[cause]!;
-    s.count++;
-    s.tokens += row.cacheWrite;
+    if (row.session) {
+      lastAny.set(sKey, row);
+      if (row.finalProvider === 'anthropic') {
+        lastAnthropic.set(sKey, row);
+      }
+    }
   }
   
   return { misses, summary, oversized };
