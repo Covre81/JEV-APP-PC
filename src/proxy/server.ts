@@ -51,6 +51,24 @@ export function rateLimitHeaderNames(headers: Record<string, string | string[]>)
     .sort();
 }
 
+export function isQuotaProbe(body: MessagesBody | undefined): boolean {
+  return typeof body?.max_tokens === 'number' && body.max_tokens <= 1;
+}
+
+export function failureCode(reason: string): string {
+  if (reason.startsWith('HTTP ')) {
+    const match = reason.match(/^HTTP \d{3}/);
+    if (match) return match[0];
+  }
+  const low = reason.toLowerCase();
+  if (low.includes('timeout') || low.includes('deadline')) return 'timeout';
+  if (low.startsWith('network:')) return 'network';
+  if (low.startsWith('not translatable')) return 'not translatable';
+  if (low.startsWith('bad response')) return 'bad response';
+  if (low === 'aborted') return 'aborted';
+  return 'other';
+}
+
 export function buildServer({
   config,
   router,
@@ -144,6 +162,52 @@ export function buildServer({
     const standard = decision.tier === 'standard' && providers.standard !== undefined;
     const cheapProvider = standard ? providers.standard! : providers.cheap;
     const cheapModel = standard ? (config.cheapStandard?.model ?? config.cheap.model) : config.cheap.model;
+
+    let upstreamFailureState: { failure?: string; status?: number; rateLimitHeaders?: string } | undefined;
+
+    const doSendCheapWithRetry = async (provider: Provider, r: ProviderRequest): Promise<ProviderResult> => {
+      const first = await provider.send(r);
+      if (first.kind === 'response') return first;
+      
+      const fc = failureCode(first.reason);
+      const isRetryable = config.cheapRetry.enabled && !r.signal.aborted && (fc.startsWith('HTTP 5') || fc === 'network' || fc === 'timeout');
+      
+      if (!isRetryable) {
+        upstreamFailureState = { failure: fc };
+        const statusMatch = first.reason.match(/^HTTP (\d+)/);
+        if (statusMatch && statusMatch[1]) upstreamFailureState.status = parseInt(statusMatch[1], 10);
+        return first;
+      }
+      
+      req.log.info({ reason: fc }, 'cheap provider failed, retrying once');
+      
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, config.cheapRetry.delayMs);
+          const abort = () => { clearTimeout(timer); reject(new Error('aborted')); };
+          if (r.signal.aborted) return abort();
+          r.signal.addEventListener('abort', abort, { once: true });
+        });
+      } catch (err) {
+        upstreamFailureState = { failure: fc };
+        const statusMatch = first.reason.match(/^HTTP (\d+)/);
+        if (statusMatch && statusMatch[1]) upstreamFailureState.status = parseInt(statusMatch[1], 10);
+        return first;
+      }
+      
+      const second = await provider.send({ ...r, headersTimeoutMs: config.cheapRetry.headersTimeoutMs });
+      if (second.kind === 'response') {
+        upstreamFailureState = { failure: `retried: ${fc}` };
+        return second;
+      }
+      
+      const finalFc = failureCode(second.reason);
+      upstreamFailureState = { failure: `retried: ${finalFc}` };
+      const statusMatch = second.reason.match(/^HTTP (\d+)/);
+      if (statusMatch && statusMatch[1]) upstreamFailureState.status = parseInt(statusMatch[1], 10);
+      return second;
+    };
+
     const exchange = (route: Route): ExchangeContext => {
       let diagnostics: ExchangeContext['diagnostics'];
       if (config.telemetry?.diagnostics) {
@@ -185,6 +249,7 @@ export function buildServer({
         toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
         quotaUtilization: quota?.current()?.utilization,
         diagnostics,
+        upstream: upstreamFailureState,
       };
     };
 
@@ -204,7 +269,7 @@ export function buildServer({
         }
 
         const fbProvider = (decision.fallbackTier === 'standard' && providers.standard) ? providers.standard : providers.cheap;
-        const resFb = await fbProvider.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+        const resFb = await doSendCheapWithRetry(fbProvider, { ...base, onStreamFailure: () => router.pinToPrimary(decision) });
         if (resFb.kind === 'response') {
           const routeDec: RouteDecision = { ...decision, route: 'cheap', reason };
           return relay(reply, resFb, routeDec, req, exchange('cheap'));
@@ -215,10 +280,12 @@ export function buildServer({
       };
 
       if (!providers.gemini || !geminiBreaker || geminiBreaker.state === 'open') {
+        upstreamFailureState = { failure: 'skipped' };
         return doFallback('skipped:gemini-unhealthy');
       }
 
       if (!geminiBreaker.acquire()) {
+        upstreamFailureState = { failure: 'skipped' };
         return doFallback('skipped:gemini-busy');
       }
 
@@ -236,6 +303,9 @@ export function buildServer({
         }
 
         req.log.warn({ reason: res.reason, conversation: decision.conversationKey }, 'gemini provider unavailable');
+        upstreamFailureState = { failure: failureCode(res.reason) };
+        const statusMatch = res.reason.match(/^HTTP (\d+)/);
+        if (statusMatch && statusMatch[1]) upstreamFailureState.status = parseInt(statusMatch[1], 10);
         return await doFallback('failover:gemini-unavailable');
       } finally {
         geminiBreaker.release(outcome);
@@ -246,11 +316,12 @@ export function buildServer({
     // pin the conversation, so it returns to cheap once the provider is back.
     if (decision.route === 'cheap' && cheapHealth?.state === 'down') {
       const skipped: RouteDecision = { ...decision, route: 'primary', reason: 'skipped:cheap-unhealthy' };
+      upstreamFailureState = { failure: 'skipped' };
       return relay(reply, await sendPrimary(base), skipped, req, exchange('primary'));
     }
 
     if (decision.route === 'cheap') {
-      const cheap = await cheapProvider.send({ ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      const cheap = await doSendCheapWithRetry(cheapProvider, { ...base, onStreamFailure: () => router.pinToPrimary(decision) });
       if (cheap.kind === 'response') return relay(reply, cheap, decision, req, exchange('cheap'));
 
       router.pinToPrimary(decision);
@@ -268,11 +339,22 @@ export function buildServer({
       return relay(reply, primary, decision, req, exchange('primary'));
     }
 
+    if (isQuotaProbe(base.body)) {
+      const quotaHeaderNames = rateLimitHeaderNames(primary.headers);
+      req.log.info({ status: primary.status, quotaHeaderNames }, 'primary rate-limited probe passed through');
+      upstreamFailureState = { status: primary.status, rateLimitHeaders: quotaHeaderNames.join(',') };
+      return relay(reply, primary, decision, req, exchange('primary'));
+    }
+
+    const quotaHeaderNames = rateLimitHeaderNames(primary.headers);
+    req.log.warn({ status: primary.status, quotaHeaderNames, conversation: decision.conversationKey }, 'primary rate-limited, failing over to cheap');
+
     // Quota failover: hold the (small) error body so it can still be relayed
     // verbatim if the cheap provider cannot take the request either.
     const errorBody = Buffer.concat(await primary.body.toArray());
     const cheap = await providers.cheap.send(base);
     if (cheap.kind === 'response') {
+      upstreamFailureState = { status: primary.status, rateLimitHeaders: quotaHeaderNames.join(',') };
       return relay(
         reply,
         cheap,

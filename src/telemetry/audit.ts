@@ -32,6 +32,11 @@ export interface ExchangeContext {
     thinkingBudget?: number | undefined;
     effort?: string | undefined;
   } | undefined;
+  readonly upstream?: {
+    status?: number;
+    rateLimitHeaders?: string;
+    failure?: string;
+  } | undefined;
 }
 
 export interface UpstreamOutcome {
@@ -182,5 +187,8 @@ function record(
     effort: ctx.diagnostics?.effort ?? null,
     cacheWrite5mTokens: result.usage?.cacheWrite5mTokens ?? null,
     cacheWrite1hTokens: result.usage?.cacheWrite1hTokens ?? null,
+    upstreamStatus: ctx.upstream?.status ?? null,
+    upstreamRatelimitHeaders: ctx.upstream?.rateLimitHeaders ?? null,
+    upstreamFailure: ctx.upstream?.failure ?? null,
   });
 }

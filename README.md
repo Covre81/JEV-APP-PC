@@ -61,8 +61,7 @@ only on work that needs Claude**.
 4. **Failure only ever moves work up to Anthropic.**
    - The request can't be translated (images, documents, server tools): primary.
    - The request is larger than the cheap model's context budget: primary.
-   - The cheap provider returns an error or times out: primary, and the
-     conversation is pinned there.
+   - The cheap provider returns an error or times out: it is retried once quickly (`CHEAP_RETRY=true`), then falls back to primary and the conversation is pinned there.
    - The cheap provider breaks mid-stream: an Anthropic `error` event is sent,
      the conversation is pinned to primary, and Claude Code retries (2.1.289
      re-sends the turn as a non-streaming request). The pin does not cover a
@@ -82,7 +81,9 @@ only on work that needs Claude**.
      next structural turn escalates as usual.
    - When Anthropic answers 429 or 529, the request is retried on the cheap
      provider (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`, now the default): a
-     degraded answer instead of a dead session.
+     degraded answer instead of a dead session. Note: session-start quota probes
+     (1 max_token) pass through to the client without falling over, preserving the
+     client's own quota warnings.
    - The risk veto (rule 7) is checked before any of this, at every level.
 6. **Some Claude Code traffic always stays primary**
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
@@ -440,6 +441,7 @@ Every `/v1/messages` exchange is written to `~/.jev-router/telemetry.db`
 | `latency_ms` | Request received → last byte sent to the client |
 | `fallback_triggered` | The cheap provider failed before answering and Anthropic served the request |
 | `outcome` | `ok`, `http_error`, `stream_error`, `client_abort` or `proxy_error` |
+| `upstream_status`, `upstream_ratelimit_headers`, `upstream_failure` | Status, Anthropic rate-limit header names, and failure reason from the upstream provider |
 
 **Why it adds no latency.** The response body passes through a tap that
 copies nothing and only scans `data:` lines that mention `usage` or `error`.

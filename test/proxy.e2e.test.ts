@@ -213,7 +213,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     const next = await claudeCode('S-down', toolLoop('fix the typo'));
     await next.body.text();
     assert.equal(next.headers['x-jev-route'], 'primary; reason=sticky');
-    assert.equal(cheapLog.length, 1, 'the cheap provider is not tried again');
+    assert.equal(cheapLog.length, 2, 'one attempt plus one retry');
     assert.equal(anthropicLog.length, 2);
   });
 

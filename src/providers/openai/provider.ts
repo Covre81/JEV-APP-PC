@@ -46,7 +46,7 @@ export class OpenAICompatibleProvider implements Provider {
         headers: { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify(chat),
         signal: req.signal,
-        headersTimeout: this.options.timeoutMs,
+        headersTimeout: req.headersTimeoutMs ?? this.options.timeoutMs,
         bodyTimeout: this.options.timeoutMs,
       });
     } catch (err) {

@@ -14,6 +14,8 @@ export interface ProviderRequest {
   readonly signal: AbortSignal;
   /** Called if a response fails after streaming started (too late to fail over). */
   readonly onStreamFailure?: () => void;
+  /** Timeout for the headers of this specific request. */
+  readonly headersTimeoutMs?: number;
 }
 
 /**
