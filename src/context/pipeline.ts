@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { getMachineOrigin } from './origin.js';
 import { searchMemory, type MemoryHit } from './memory-source.js';
 import { getGraphSources, type GraphData, type GraphCommunity } from './graph-source.js';
+import { isProjectDir } from './project-dir.js';
 import { JevClient } from './jev-client.js';
 import { rankCommunities, STAGE1_INSTRUCTIONS, type SelectedCommunity } from './relevance.js';
 import { scoreCandidates, STAGE2_INSTRUCTIONS, type Candidate, type ScoredCandidate } from './select.js';
@@ -116,6 +117,11 @@ export async function runPipeline(
     return { outcome: 'ok', stdout: '' };
   }
 
+  if (!isProjectDir(input.cwd)) {
+    record('skipped_cwd', 'cwd is not a project');
+    return { outcome: 'skipped_cwd', stdout: '' };
+  }
+
   // 3. Check for API key configuration
   if (!config.apiKey) {
     const error = 'TYPESAFE_API_KEY is not set';
@@ -125,7 +131,11 @@ export async function runPipeline(
 
   // Setup AbortController for global timeout
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), config.timeoutMs);
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, config.timeoutMs);
 
   let finalOutcome: 'ok' | 'partial' | 'source_error' | 'jev_error' | 'timeout' = 'ok';
   const errors: string[] = [];
@@ -173,7 +183,7 @@ export async function runPipeline(
       finalOutcome = 'partial';
     }
   } catch (err: any) {
-    if (err.name === 'AbortError' || controller.signal.aborted) {
+    if (err.name === 'AbortError' || timedOut) {
       finalOutcome = 'timeout';
     } else {
       finalOutcome = 'source_error';
@@ -248,7 +258,7 @@ export async function runPipeline(
 
       allCandidates.push(...scoredCandidates);
     } catch (err: any) {
-      if (err.name === 'AbortError' || controller.signal.aborted) {
+      if (err.name === 'AbortError' || timedOut) {
         finalOutcome = 'timeout';
       } else {
         // HTTP status + API reason (JevHttpError), schema path (JevSchemaError) or a network error.
@@ -259,11 +269,16 @@ export async function runPipeline(
   }
 
   clearTimeout(timeoutId);
+  if (!controller.signal.aborted) {
+    controller.abort();
+  }
 
   // If timeout was triggered during execution, override outcome
-  if (controller.signal.aborted) {
+  if (timedOut) {
     finalOutcome = 'timeout';
-    errors.push(`timeout after ${config.timeoutMs} ms`);
+    if (!errors.some(e => e.startsWith('timeout after'))) {
+      errors.push(`timeout after ${config.timeoutMs} ms`);
+    }
   }
   const error = errors.length > 0 ? errors.join('; ') : undefined;
 
