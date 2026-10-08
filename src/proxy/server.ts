@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { Readable } from 'node:stream';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import type { Dispatcher } from 'undici';
@@ -42,6 +42,15 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+let lastQuotaHeaderNamesStr: string | undefined;
+let loggedNoQuotaHeaders = false;
+
+export function rateLimitHeaderNames(headers: Record<string, string | string[]>): string[] {
+  return Object.keys(headers)
+    .filter((k) => k.toLowerCase().startsWith('anthropic-ratelimit'))
+    .sort();
+}
+
 export function buildServer({
   config,
   router,
@@ -54,17 +63,37 @@ export function buildServer({
 }: ServerDeps): FastifyInstance {
   const startedAt = new Date().toISOString();
 
-  /** Every Anthropic answer carries the quota: read it on the way through, whatever the path. */
-  const sendPrimary = async (req: ProviderRequest): Promise<ProviderResult> => {
-    const result = await providers.primary.send(req);
-    if (result.kind === 'response') quota?.observe(result.headers);
-    return result;
-  };
   const app = Fastify({
     logger: { level: config.logLevel },
     bodyLimit: config.bodyLimitBytes,
     exposeHeadRoutes: false,
   });
+
+  /** Every Anthropic answer carries the quota: read it on the way through, whatever the path. */
+  const sendPrimary = async (req: ProviderRequest): Promise<ProviderResult> => {
+    const result = await providers.primary.send(req);
+    if (result.kind === 'response') {
+      quota?.observe(result.headers);
+      if (config.telemetry?.diagnostics && req.url.startsWith('/v1/messages')) {
+        try {
+          const names = rateLimitHeaderNames(result.headers);
+          if (names.length > 0) {
+            const namesStr = names.join(',');
+            if (namesStr !== lastQuotaHeaderNamesStr) {
+              lastQuotaHeaderNamesStr = namesStr;
+              app.log.info({ quotaHeaderNames: names }, 'anthropic rate-limit headers seen');
+            }
+          } else if (result.status >= 200 && result.status < 300) {
+            if (!loggedNoQuotaHeaders) {
+              loggedNoQuotaHeaders = true;
+              app.log.info('no anthropic-ratelimit headers on responses');
+            }
+          }
+        } catch (err) {}
+      }
+    }
+    return result;
+  };
 
   // Keep every body as raw bytes: primary-bound requests are forwarded byte-for-byte.
   app.removeAllContentTypeParsers();
@@ -115,16 +144,49 @@ export function buildServer({
     const standard = decision.tier === 'standard' && providers.standard !== undefined;
     const cheapProvider = standard ? providers.standard! : providers.cheap;
     const cheapModel = standard ? (config.cheapStandard?.model ?? config.cheap.model) : config.cheap.model;
-    const exchange = (route: Route): ExchangeContext => ({
-      startedAt,
-      startedAtMs,
-      humanText: latestHumanText(base.body!),
-      requestClass: single(req.headers, 'x-claude-code-request-class'),
-      model: route === 'primary' ? base.body!.model : (route === 'gemini' ? config.gemini?.model : cheapModel),
-      requestedModel: base.body!.model,
-      toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
-      quotaUtilization: quota?.current()?.utilization,
-    });
+    const exchange = (route: Route): ExchangeContext => {
+      let diagnostics: ExchangeContext['diagnostics'];
+      if (config.telemetry?.diagnostics) {
+        try {
+          const body = base.body!;
+          const stringify = (v: unknown) => (v !== undefined ? JSON.stringify(v) : undefined);
+          const hash16 = (s: string | undefined) => (s ? createHash('sha256').update(s).digest('hex').slice(0, 16) : undefined);
+          const sysStr = stringify(body.system);
+          const toolsStr = stringify(body['tools']);
+          const ccCompaction = single(req.headers, 'x-claude-code-compaction');
+          const ccContextCompacted = single(req.headers, 'x-claude-code-context-compacted');
+          const compaction = ccCompaction ?? (ccContextCompacted ? `context-compacted:${ccContextCompacted}` : undefined);
+          
+          diagnostics = {
+            ccSessionId: single(req.headers, 'x-claude-code-session-id'),
+            agentType: single(req.headers, 'x-claude-code-agent-type'),
+            promptId: single(req.headers, 'x-claude-code-prompt-id'),
+            compaction,
+            systemHash: hash16(sysStr),
+            toolsHash: hash16(toolsStr),
+            systemChars: sysStr?.length,
+            toolsChars: toolsStr?.length,
+            maxTokens: typeof body.max_tokens === 'number' ? body.max_tokens : undefined,
+            thinkingType: typeof body['thinking'] === 'object' && body['thinking'] ? (body['thinking'] as any).type : undefined,
+            thinkingBudget: typeof body['thinking'] === 'object' && body['thinking'] ? (body['thinking'] as any).budget_tokens : undefined,
+            effort: typeof body['output_config'] === 'object' && body['output_config'] ? (body['output_config'] as any).effort : undefined,
+          };
+        } catch (err) {
+          req.log.warn({ err }, 'diagnostics capture failed');
+        }
+      }
+      return {
+        startedAt,
+        startedAtMs,
+        humanText: latestHumanText(base.body!),
+        requestClass: single(req.headers, 'x-claude-code-request-class'),
+        model: route === 'primary' ? base.body!.model : (route === 'gemini' ? config.gemini?.model : cheapModel),
+        requestedModel: base.body!.model,
+        toolsOffered: Array.isArray(base.body!['tools']) ? base.body!['tools'].length : 0,
+        quotaUtilization: quota?.current()?.utilization,
+        diagnostics,
+      };
+    };
 
     if (decision.route === 'gemini') {
       const fallbackToPrimary = async (reason: import('../routing/router.js').RouteReason) => {

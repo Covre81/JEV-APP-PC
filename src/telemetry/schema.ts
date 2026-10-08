@@ -73,6 +73,20 @@ export interface RouterLog {
   readonly inspectionMiss: boolean | null;
   /** Binding Claude quota window (0..1) when the exchange was routed; null when none was seen yet. */
   readonly quotaUtilization: number | null;
+  readonly ccSessionId?: string | null;
+  readonly agentType?: string | null;
+  readonly promptId?: string | null;
+  readonly compaction?: string | null;
+  readonly systemHash?: string | null;
+  readonly toolsHash?: string | null;
+  readonly systemChars?: number | null;
+  readonly toolsChars?: number | null;
+  readonly maxTokens?: number | null;
+  readonly thinkingType?: string | null;
+  readonly thinkingBudget?: number | null;
+  readonly effort?: string | null;
+  readonly cacheWrite5mTokens?: number | null;
+  readonly cacheWrite1hTokens?: number | null;
 }
 
 export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
@@ -146,6 +160,20 @@ export const MIGRATIONS: readonly string[] = [
   ALTER TABLE context_runs ADD prompt_chars integer;
   ALTER TABLE context_runs ADD latency_ms integer;
   ALTER TABLE context_runs ADD error text;`,
+  `ALTER TABLE router_logs ADD cc_session_id text;
+  ALTER TABLE router_logs ADD agent_type text;
+  ALTER TABLE router_logs ADD prompt_id text;
+  ALTER TABLE router_logs ADD compaction text;
+  ALTER TABLE router_logs ADD system_hash text;
+  ALTER TABLE router_logs ADD tools_hash text;
+  ALTER TABLE router_logs ADD system_chars integer;
+  ALTER TABLE router_logs ADD tools_chars integer;
+  ALTER TABLE router_logs ADD max_tokens integer;
+  ALTER TABLE router_logs ADD thinking_type text;
+  ALTER TABLE router_logs ADD thinking_budget integer;
+  ALTER TABLE router_logs ADD effort text;
+  ALTER TABLE router_logs ADD cache_write_5m_tokens integer;
+  ALTER TABLE router_logs ADD cache_write_1h_tokens integer;`,
 ];
 
 /**
@@ -168,11 +196,15 @@ export function recordQuota(db: TelemetryDb, s: QuotaSnapshot): void {
 export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
   created_at, session_id, human_prompt_hash, jev_decision, final_provider, model, requested_model, route_reason,
   request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
-  fallback_triggered, tools_offered, tool_calls, inspection_miss, quota_utilization
+  fallback_triggered, tools_offered, tool_calls, inspection_miss, quota_utilization,
+  cc_session_id, agent_type, prompt_id, compaction, system_hash, tools_hash, system_chars, tools_chars,
+  max_tokens, thinking_type, thinking_budget, effort, cache_write_5m_tokens, cache_write_1h_tokens
 ) VALUES (
   @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
   @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
-  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss, @quotaUtilization
+  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss, @quotaUtilization,
+  @ccSessionId, @agentType, @promptId, @compaction, @systemHash, @toolsHash, @systemChars, @toolsChars,
+  @maxTokens, @thinkingType, @thinkingBudget, @effort, @cacheWrite5mTokens, @cacheWrite1hTokens
 )`;
 
 /** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
@@ -198,4 +230,18 @@ export const insertParams = (r: NewRouterLog) => ({
   toolCalls: r.toolCalls ?? null,
   inspectionMiss: r.inspectionMiss == null ? null : r.inspectionMiss ? 1 : 0,
   quotaUtilization: r.quotaUtilization ?? null,
+  ccSessionId: r.ccSessionId ?? null,
+  agentType: r.agentType ?? null,
+  promptId: r.promptId ?? null,
+  compaction: r.compaction ?? null,
+  systemHash: r.systemHash ?? null,
+  toolsHash: r.toolsHash ?? null,
+  systemChars: r.systemChars ?? null,
+  toolsChars: r.toolsChars ?? null,
+  maxTokens: r.maxTokens ?? null,
+  thinkingType: r.thinkingType ?? null,
+  thinkingBudget: r.thinkingBudget ?? null,
+  effort: r.effort ?? null,
+  cacheWrite5mTokens: r.cacheWrite5mTokens ?? null,
+  cacheWrite1hTokens: r.cacheWrite1hTokens ?? null,
 });

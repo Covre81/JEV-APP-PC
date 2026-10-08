@@ -65,6 +65,7 @@ const Env = z
     SESSION_TTL_MS: z.coerce.number().int().positive().default(6 * 60 * 60 * 1000),
 
     TELEMETRY_ENABLED: bool.default(true),
+    TELEMETRY_DIAGNOSTICS: bool.default(false),
     TELEMETRY_DB_PATH: z.string().min(1).optional(),
     GEMINI_TIER: z.enum(['off', 'on']).default('off'),
     GEMINI_TIER_BIN: z.string().optional(),
@@ -207,6 +208,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
             home: e.GEMINI_TIER_HOME ?? join(jevHome(env), 'agy-home'),
           },
     // dbPath is undefined when telemetry is disabled.
-    telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined },
+    telemetry: { dbPath: e.TELEMETRY_ENABLED ? (e.TELEMETRY_DB_PATH ?? defaultTelemetryDbPath(env)) : undefined, diagnostics: e.TELEMETRY_DIAGNOSTICS },
   };
 }

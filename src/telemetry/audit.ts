@@ -18,6 +18,20 @@ export interface ExchangeContext {
   readonly toolsOffered: number;
   /** Binding Claude quota window when the exchange was routed. */
   readonly quotaUtilization?: number | undefined;
+  readonly diagnostics?: {
+    ccSessionId?: string | undefined;
+    agentType?: string | undefined;
+    promptId?: string | undefined;
+    compaction?: string | undefined;
+    systemHash?: string | undefined;
+    toolsHash?: string | undefined;
+    systemChars?: number | undefined;
+    toolsChars?: number | undefined;
+    maxTokens?: number | undefined;
+    thinkingType?: string | undefined;
+    thinkingBudget?: number | undefined;
+    effort?: string | undefined;
+  } | undefined;
 }
 
 export interface UpstreamOutcome {
@@ -154,5 +168,19 @@ function record(
     toolCalls: result.toolCalls,
     inspectionMiss: cheap ? result.outcome === 'ok' && ctx.toolsOffered > 0 && result.toolCalls === 0 : null,
     quotaUtilization: ctx.quotaUtilization ?? null,
+    ccSessionId: ctx.diagnostics?.ccSessionId ?? null,
+    agentType: ctx.diagnostics?.agentType ?? null,
+    promptId: ctx.diagnostics?.promptId ?? null,
+    compaction: ctx.diagnostics?.compaction ?? null,
+    systemHash: ctx.diagnostics?.systemHash ?? null,
+    toolsHash: ctx.diagnostics?.toolsHash ?? null,
+    systemChars: ctx.diagnostics?.systemChars ?? null,
+    toolsChars: ctx.diagnostics?.toolsChars ?? null,
+    maxTokens: ctx.diagnostics?.maxTokens ?? null,
+    thinkingType: ctx.diagnostics?.thinkingType ?? null,
+    thinkingBudget: ctx.diagnostics?.thinkingBudget ?? null,
+    effort: ctx.diagnostics?.effort ?? null,
+    cacheWrite5mTokens: result.usage?.cacheWrite5mTokens ?? null,
+    cacheWrite1hTokens: result.usage?.cacheWrite1hTokens ?? null,
   });
 }

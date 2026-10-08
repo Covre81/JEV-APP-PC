@@ -16,6 +16,8 @@ export interface CostRow {
   /** Tokens the JEV classification of this turn billed (null when JEV was not called). */
   readonly jevTokensIn: number | null;
   readonly jevTokensOut: number | null;
+  readonly cacheWrite5mTokens?: number | null;
+  readonly cacheWrite1hTokens?: number | null;
 }
 
 export interface NetCost {
@@ -114,8 +116,12 @@ export function computeNetCost(rows: readonly CostRow[], pricing: Pricing): NetC
       const tin = row.tokensIn ?? 0;
       const read = row.cacheReadTokens ?? 0;
       const write = row.cacheWriteTokens ?? 0;
+      let writeCost = write * p.input * writeMult;
+      if (row.cacheWrite5mTokens != null || row.cacheWrite1hTokens != null) {
+        writeCost = ((row.cacheWrite5mTokens ?? 0) * 1.25 + (row.cacheWrite1hTokens ?? 0) * 2) * p.input;
+      }
       const actual =
-        (Math.max(0, tin - read - write) * p.input + write * p.input * writeMult + read * p.cacheRead +
+        (Math.max(0, tin - read - write) * p.input + writeCost + read * p.cacheRead +
           (row.tokensOut ?? 0) * p.output) /
         PER_MTOK;
       anthropicUsd += actual;

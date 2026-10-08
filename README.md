@@ -483,6 +483,17 @@ Known limits:
 - requests whose response carried no `usage` are counted and reported, but
   priced at $0.
 
+
+### Diagnostics (R0)
+
+When `TELEMETRY_DIAGNOSTICS=true` (default: false) is set, the router logs additional metadata into the telemetry database for deep inspection of agent behavior, context management, and rate limits.
+To respect privacy, only hashes (e.g. `system_hash`, `tools_hash`), lengths (`system_chars`), token counts, and header names are stored; full strings, secrets or prompt contents are never recorded.
+
+Additional `jev-router stats` flags are available for diagnostic queries:
+- `--by-class`: aggregates usage and proxy USD costs split by `x-claude-code-request-class` and `requested_model`.
+- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-row-of-session`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
+- `--daily`: aggregates traffic and USD costs per day, and prints overall task count, median/p90 USD per task, and the top 10 most expensive tasks.
+
 Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:
 
 - the share of turns that went cheap;

@@ -10,6 +10,8 @@ export interface Usage {
   readonly cacheReadTokens: number;
   /** Portion of tokensIn written to the prompt cache (billed at the write premium). */
   readonly cacheWriteTokens: number;
+  readonly cacheWrite5mTokens?: number;
+  readonly cacheWrite1hTokens?: number;
 }
 
 export interface MeteredBody {
@@ -33,6 +35,10 @@ interface UsageFields {
   output_tokens?: unknown;
   cache_creation_input_tokens?: unknown;
   cache_read_input_tokens?: unknown;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: unknown;
+    ephemeral_1h_input_tokens?: unknown;
+  };
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -49,6 +55,8 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   let output: number | undefined;
   let cacheRead = 0;
   let cacheWrite = 0;
+  let cache5m: number | undefined;
+  let cache1h: number | undefined;
   let errorEvent = false;
   let seen = false;
   let toolCalls = 0;
@@ -62,6 +70,8 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
     output = num(u.output_tokens) ?? output;
     cacheRead = num(u.cache_read_input_tokens) ?? cacheRead;
     cacheWrite = num(u.cache_creation_input_tokens) ?? cacheWrite;
+    cache5m = num(u.cache_creation?.ephemeral_5m_input_tokens) ?? cache5m;
+    cache1h = num(u.cache_creation?.ephemeral_1h_input_tokens) ?? cache1h;
   };
 
   let settle!: () => void;
@@ -122,15 +132,18 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
 
   return {
     body: tap,
-    usage: () =>
-      seen && (input !== undefined || output !== undefined)
-        ? {
-            tokensIn: (input ?? 0) + cacheRead + cacheWrite,
-            tokensOut: output ?? 0,
-            cacheReadTokens: cacheRead,
-            cacheWriteTokens: cacheWrite,
-          }
-        : undefined,
+    usage: () => {
+      if (!seen || (input === undefined && output === undefined)) return undefined;
+      const res: Usage = {
+        tokensIn: (input ?? 0) + cacheRead + cacheWrite,
+        tokensOut: output ?? 0,
+        cacheReadTokens: cacheRead,
+        cacheWriteTokens: cacheWrite,
+      };
+      if (cache5m !== undefined) (res as any).cacheWrite5mTokens = cache5m;
+      if (cache1h !== undefined) (res as any).cacheWrite1hTokens = cache1h;
+      return res;
+    },
     sawErrorEvent: () => errorEvent,
     toolCalls: () => toolCalls,
     settled,

@@ -34,6 +34,10 @@ async function main(argv: string[]): Promise<number> {
       db: { type: 'string' },
       since: { type: 'string' },
       json: { type: 'boolean', default: false },
+      'by-class': { type: 'boolean', default: false },
+      'cache-misses': { type: 'boolean', default: false },
+      'min-write': { type: 'string' },
+      daily: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -87,7 +91,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`No telemetry database at ${dbPath}. Start the gateway with \`jev-router serve\` first.`);
         return 1;
       }
-      const [{ openTelemetryDb }, { computeStats, parseSince, renderStats }, { pricingFromEnv }] = await Promise.all([
+      const [{ openTelemetryDb }, statsModule, { pricingFromEnv }] = await Promise.all([
         import('./telemetry/db.js'),
         import('./telemetry/stats.js'),
         import('./telemetry/pricing.js'),
@@ -95,11 +99,29 @@ async function main(argv: string[]): Promise<number> {
       // Writable on purpose: applies pending migrations if the gateway has not run since an upgrade.
       const db = openTelemetryDb(dbPath);
       try {
-        const stats = computeStats(db, {
-          ...(values.since ? { since: parseSince(values.since) } : {}),
-          pricing: pricingFromEnv(),
-        });
-        console.log(values.json ? JSON.stringify(stats, null, 2) : renderStats(stats));
+        const pricing = pricingFromEnv();
+        const opts = values.since ? { since: statsModule.parseSince(values.since) } : {};
+        if (values['by-class']) {
+          const stats = statsModule.computeStatsByClass(db, pricing, opts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderStatsByClass(stats));
+        } else if (values['cache-misses']) {
+          const missOpts: any = { ...opts };
+          if (values['min-write'] !== undefined) {
+            if (!/^[1-9]\d*$/.test(values['min-write']!)) {
+              console.error('--min-write must be a positive integer.');
+              return 1;
+            }
+            missOpts.minWrite = parseInt(values['min-write']!, 10);
+          }
+          const stats = statsModule.computeCacheMisses(db, pricing, missOpts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderCacheMisses(stats));
+        } else if (values.daily) {
+          const stats = statsModule.computeDailyStats(db, pricing, opts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderDailyStats(stats));
+        } else {
+          const stats = statsModule.computeStats(db, { ...opts, pricing });
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderStats(stats));
+        }
       } finally {
         db.close();
       }
