@@ -67,6 +67,7 @@ const Env = z
     CHEAP_RETRY: bool.default(true),
     CHEAP_RETRY_DELAY_MS: z.coerce.number().int().min(0).default(250),
     CHEAP_RETRY_HEADERS_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+    CHEAP_READ_FIRST_HINT: bool.default(true),
 
     TELEMETRY_ENABLED: bool.default(true),
     TELEMETRY_DIAGNOSTICS: bool.default(false),
@@ -174,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       delayMs: e.CHEAP_RETRY_DELAY_MS,
       headersTimeoutMs: e.CHEAP_RETRY_HEADERS_TIMEOUT_MS,
     },
+    cheapReadFirstHint: e.CHEAP_READ_FIRST_HINT,
     // undefined = standard tier off: level-2 work stays on the primary (the old behavior).
     cheapStandard:
       e.CHEAP_MODEL_STANDARD === 'off'

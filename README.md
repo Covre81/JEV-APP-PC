@@ -81,9 +81,9 @@ only on work that needs Claude**.
      next structural turn escalates as usual.
    - When Anthropic answers 429 or 529, the request is retried on the cheap
      provider (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`, now the default): a
-     degraded answer instead of a dead session. Note: session-start quota probes
-     (1 max_token) pass through to the client without falling over, preserving the
-     client's own quota warnings.
+     degraded answer instead of a dead session. Session-start quota probes
+     (max_tokens <= 1) are never rerouted: their 429/529 reaches Claude Code unchanged,
+     with its anthropic-ratelimit-* headers, so Claude Code can show its own quota warning.
    - The risk veto (rule 7) is checked before any of this, at every level.
 6. **Some Claude Code traffic always stays primary**
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
@@ -122,6 +122,13 @@ only on work that needs Claude**.
 - **Claude Code shows the wrong model name on the cheap route.** It keeps
   showing the model you picked. The truth is in the `x-jev-route` response
   header and the `route decision` log line.
+
+### Read-first hint (`CHEAP_READ_FIRST_HINT`)
+
+On the cheap route, the model might try to guess the project's state instead of reading its files.
+When `CHEAP_READ_FIRST_HINT=true` (the default), if a session's first turn is a broad question about what to do next (e.g. "what next?", "onde paramos?"), the router appends a short instruction to the system prompt telling the cheap model to read project files (like `README`, `CLAUDE.md` or plan documents) with its tools before answering.
+- **When it fires:** only on the cheap/standard tiers, only on a fresh conversation's first turn, only when the user's prompt matches an open-ended "what next" pattern, and only if file-reading tools are available.
+- **How to turn it off:** set `CHEAP_READ_FIRST_HINT=false` in your `.env`.
 
 ## Gemini tier (Antigravity CLI subscription)
 
@@ -493,7 +500,7 @@ To respect privacy, only hashes (e.g. `system_hash`, `tools_hash`), lengths (`sy
 
 Additional `jev-router stats` flags are available for diagnostic queries:
 - `--by-class`: aggregates usage and proxy USD costs split by `x-claude-code-request-class` and `requested_model`.
-- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-row-of-session`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
+- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-turn-of-session`, `return-from-cheap`, `failover-from-cheap`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
 - `--daily`: aggregates traffic and USD costs per day, and prints overall task count, median/p90 USD per task, and the top 10 most expensive tasks.
 
 Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:

@@ -9,6 +9,7 @@ import type { CheapState } from '../providers/cheap-health.js';
 import type { Provider, ProviderRequest, ProviderResult } from '../providers/provider.js';
 import type { QuotaStore } from '../quota.js';
 import { latestHumanText, parseMessagesBody, type MessagesBody } from '../routing/messages-body.js';
+import { needsReadFirstHint, withReadFirstHint } from '../routing/read-first-hint.js';
 import type { RouteDecision, Router } from '../routing/router.js';
 import { auditExchange, auditFailure, type ExchangeContext } from '../telemetry/audit.js';
 import { noopTelemetry, type TelemetrySink } from '../telemetry/recorder.js';
@@ -163,6 +164,13 @@ export function buildServer({
     const cheapProvider = standard ? providers.standard! : providers.cheap;
     const cheapModel = standard ? (config.cheapStandard?.model ?? config.cheap.model) : config.cheap.model;
 
+    let cheapReq = { ...base };
+    if (decision.route === 'cheap' && config.cheapReadFirstHint && base.body && needsReadFirstHint(base.body)) {
+      const hintedBody = withReadFirstHint(base.body);
+      cheapReq = { ...cheapReq, body: hintedBody, rawBody: Buffer.from(JSON.stringify(hintedBody)) };
+      req.log.info({ conversation: decision.conversationKey }, 'read-first hint added');
+    }
+
     let upstreamFailureState: { failure?: string; status?: number; rateLimitHeaders?: string } | undefined;
 
     const doSendCheapWithRetry = async (provider: Provider, r: ProviderRequest): Promise<ProviderResult> => {
@@ -269,7 +277,7 @@ export function buildServer({
         }
 
         const fbProvider = (decision.fallbackTier === 'standard' && providers.standard) ? providers.standard : providers.cheap;
-        const resFb = await doSendCheapWithRetry(fbProvider, { ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+        const resFb = await doSendCheapWithRetry(fbProvider, { ...cheapReq, onStreamFailure: () => router.pinToPrimary(decision) });
         if (resFb.kind === 'response') {
           const routeDec: RouteDecision = { ...decision, route: 'cheap', reason };
           return relay(reply, resFb, routeDec, req, exchange('cheap'));
@@ -321,7 +329,7 @@ export function buildServer({
     }
 
     if (decision.route === 'cheap') {
-      const cheap = await doSendCheapWithRetry(cheapProvider, { ...base, onStreamFailure: () => router.pinToPrimary(decision) });
+      const cheap = await doSendCheapWithRetry(cheapProvider, { ...cheapReq, onStreamFailure: () => router.pinToPrimary(decision) });
       if (cheap.kind === 'response') return relay(reply, cheap, decision, req, exchange('cheap'));
 
       router.pinToPrimary(decision);
@@ -352,7 +360,7 @@ export function buildServer({
     // Quota failover: hold the (small) error body so it can still be relayed
     // verbatim if the cheap provider cannot take the request either.
     const errorBody = Buffer.concat(await primary.body.toArray());
-    const cheap = await providers.cheap.send(base);
+    const cheap = await providers.cheap.send(cheapReq);
     if (cheap.kind === 'response') {
       upstreamFailureState = { status: primary.status, rateLimitHeaders: quotaHeaderNames.join(',') };
       return relay(

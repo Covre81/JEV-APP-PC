@@ -123,9 +123,9 @@ describe('R0 Diagnostics - Stats and Pricing', () => {
 
     const stats = computeCacheMisses(db, pricing, { minWrite: 150000 });
     const causes = stats.misses.map((m: any) => m.cause);
-    assert.deepEqual(causes, ['first-row-of-session', 'compaction', 'first-row-of-session', 'model-switch', 'system-changed', 'tools-changed', 'gap5-60m', 'gap>1h', 'unknown']);
+    assert.deepEqual(causes, ['first-turn-of-session', 'compaction', 'first-turn-of-session', 'model-switch', 'system-changed', 'tools-changed', 'gap5-60m', 'gap>1h', 'unknown']);
     
-    assert.equal(stats.summary['first-row-of-session']!.count, 2);
+    assert.equal(stats.summary['first-turn-of-session']!.count, 2);
     assert.equal(stats.summary['compaction']!.count, 1);
     assert.equal(stats.summary['model-switch']!.count, 1);
     assert.equal(stats.summary['system-changed']!.count, 1);

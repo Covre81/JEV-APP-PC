@@ -57,6 +57,61 @@ export function promptHash(text: string | undefined): string | null {
   return text === undefined ? null : createHash('sha256').update(text).digest('hex');
 }
 
+export function isAcknowledgement(text: string): boolean {
+  if (!text) return false;
+  if (text.includes('?')) return false;
+  const words = text.trim().split(/\s+/);
+  if (words.length > 12 || words.length === 0 || words[0] === '') return false;
+
+  if (text.includes('/') || text.includes('\\')) return false;
+  for (const w of words) {
+    if (/\.[a-zA-Z]{1,4}(?:[^a-zA-Z]|$)/.test(w)) return false;
+  }
+
+  const normalized = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const tokens = normalized.split(/[^a-z0-9]+/).filter(Boolean);
+
+  const containsPhrase = (phrase: string) => {
+    const pTokens = phrase.split(' ');
+    for (let i = 0; i <= tokens.length - pTokens.length; i++) {
+      let match = true;
+      for (let j = 0; j < pTokens.length; j++) {
+        if (tokens[i + j] !== pTokens[j]) {
+          match = false;
+          break;
+        }
+      }
+      if (match) return true;
+    }
+    return false;
+  };
+
+  const requestCues = [
+    'now', 'agora', 'please', 'por favor', 'can you', 'could you', 'fix', 'add',
+    'create', 'run', 'read', 'write', 'change', 'implement', 'update', 'remove',
+    'delete', 'make', 'check', 'review', 'explain', 'show me', 'faz', 'faca',
+    'corrige', 'corrija', 'cria', 'crie', 'roda', 'rode', 'leia', 'escreva',
+    'mude', 'implemente', 'atualize', 'remova', 'verifique', 'revise', 'explique',
+    'mostre', 'vamos', 'preciso', 'quero'
+  ];
+
+  for (const cue of requestCues) {
+    if (containsPhrase(cue)) return false;
+  }
+
+  const approvalWords = [
+    'ok', 'okay', 'thanks', 'thank you', 'valeu', 'obrigado', 'obrigada',
+    'top', 'otimo', 'perfeito', 'great', 'nice', 'legal', 'show', 'beleza',
+    'massa', 'boa'
+  ];
+
+  for (const word of approvalWords) {
+    if (containsPhrase(word)) return true;
+  }
+
+  return false;
+}
+
 export function jevDecisionOf(decision: RouteDecision): JevDecision | null {
   const d = decision.distribution;
   if (!d) return null;
@@ -118,6 +173,7 @@ export function auditExchange(
           latencyMs,
           usage: metered.usage(),
           toolCalls: metered.toolCalls(),
+          endsWithQuestion: metered.endsWithQuestion(),
         });
       } catch (err) {
         onError(err);
@@ -135,6 +191,7 @@ export function auditFailure(sink: TelemetrySink, decision: RouteDecision, ctx: 
     latencyMs: Math.round(performance.now() - ctx.startedAt),
     usage: undefined,
     toolCalls: null,
+    endsWithQuestion: false,
   });
 }
 
@@ -148,6 +205,7 @@ function record(
     latencyMs: number;
     usage: ReturnType<MeteredBody['usage']>;
     toolCalls: number | null;
+    endsWithQuestion: boolean;
   },
 ): void {
   const cheap = decision.route === 'cheap';
@@ -171,7 +229,7 @@ function record(
     fallbackTriggered: decision.reason === 'failover:cheap-unavailable' || decision.reason === 'failover:gemini-unavailable',
     toolsOffered: ctx.toolsOffered,
     toolCalls: result.toolCalls,
-    inspectionMiss: cheap ? result.outcome === 'ok' && ctx.toolsOffered > 0 && result.toolCalls === 0 : null,
+    inspectionMiss: cheap ? result.outcome === 'ok' && ctx.toolsOffered > 0 && result.toolCalls === 0 && ctx.humanText !== undefined && !isAcknowledgement(ctx.humanText) && !result.endsWithQuestion : null,
     quotaUtilization: ctx.quotaUtilization ?? null,
     ccSessionId: ctx.diagnostics?.ccSessionId ?? null,
     agentType: ctx.diagnostics?.agentType ?? null,
