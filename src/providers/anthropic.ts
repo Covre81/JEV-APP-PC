@@ -1,4 +1,4 @@
-import { request } from 'undici';
+import { request, type Dispatcher } from 'undici';
 import { forwardableHeaders, type HeaderMap } from '../proxy/headers.js';
 import type { Provider, ProviderRequest, ProviderResult } from './provider.js';
 
@@ -7,6 +7,7 @@ export interface AnthropicProviderOptions {
   readonly timeoutMs: number;
   readonly authMode: 'passthrough' | 'inject';
   readonly apiKey: string | undefined;
+  readonly dispatcher?: Dispatcher;
 }
 
 /**
@@ -20,20 +21,38 @@ export class AnthropicProvider implements Provider {
   constructor(private readonly options: AnthropicProviderOptions) {}
 
   async send(req: ProviderRequest): Promise<ProviderResult> {
+    const ac = new AbortController();
+    const combinedSignal = AbortSignal.any([req.signal, ac.signal]);
+    let timer: NodeJS.Timeout | undefined;
+
+    const reqPromise = request(`${this.options.baseUrl}${req.url}`, {
+      method: req.method,
+      headers: this.withAuth(req.headers),
+      body: req.rawBody ?? null,
+      signal: combinedSignal,
+      headersTimeout: this.options.timeoutMs,
+      bodyTimeout: this.options.timeoutMs,
+      ...(this.options.dispatcher ? { dispatcher: this.options.dispatcher } : {})
+    });
+
     let res;
     try {
-      res = await request(`${this.options.baseUrl}${req.url}`, {
-        method: req.method,
-        headers: this.withAuth(req.headers),
-        body: req.rawBody ?? null,
-        signal: req.signal,
-        headersTimeout: this.options.timeoutMs,
-        bodyTimeout: this.options.timeoutMs,
-      });
+      res = await Promise.race([
+        reqPromise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            ac.abort();
+            reject(new Error('upstream response headers deadline exceeded'));
+          }, this.options.timeoutMs);
+        }),
+      ]);
     } catch (err) {
+      reqPromise.then((lateRes) => lateRes.body.destroy()).catch(() => {});
       // The client left: nothing to report. Anything else never reached Anthropic.
       if (req.signal.aborted) throw err;
       return { kind: 'unavailable', reason: `network: ${(err as Error).message}` };
+    } finally {
+      clearTimeout(timer);
     }
     return { kind: 'response', status: res.statusCode, headers: forwardableHeaders(res.headers), body: res.body };
   }

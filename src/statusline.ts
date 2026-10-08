@@ -1,6 +1,14 @@
 import { existsSync } from 'node:fs';
+import { isStaleBuild, type BuildInfo } from './build-info.js';
 import { openTelemetryDb } from './telemetry/db.js';
-import { cheapShare, lastRoute, renderStatusLine, sessionContext, type StatusLineData } from './telemetry/statusline.js';
+import {
+  cheapShare,
+  lastRoute,
+  latestQuota,
+  renderStatusLine,
+  sessionContext,
+  type StatusLineData,
+} from './telemetry/statusline.js';
 
 const HEALTH_TIMEOUT_MS = 500;
 const STDIN_TIMEOUT_MS = 300;
@@ -9,6 +17,15 @@ export interface StatusLineOptions {
   readonly dbPath: string;
   readonly healthUrl: string;
   readonly sessionId?: string;
+  /** dist/build-info.json of this checkout, compared with what /healthz says is running. */
+  readonly localBuild?: BuildInfo;
+}
+
+/** The part of /healthz the status line reads; older routers answer only `{ok:true}`. */
+interface Health {
+  readonly sha?: string | null;
+  readonly builtAt?: string | null;
+  readonly cheap?: string;
 }
 
 /**
@@ -16,9 +33,14 @@ export interface StatusLineOptions {
  * it must answer fast and never fail, so every error degrades to less
  * information instead of an exception.
  */
-export async function statusLine({ dbPath, healthUrl, sessionId }: StatusLineOptions): Promise<string> {
-  const healthy = await probeHealth(healthUrl);
-  let data: StatusLineData = { healthy };
+export async function statusLine({ dbPath, healthUrl, sessionId, localBuild }: StatusLineOptions): Promise<string> {
+  const health = await probeHealth(healthUrl);
+  const healthy = health !== undefined;
+  let data: StatusLineData = {
+    healthy,
+    ...(isStaleBuild(localBuild, { sha: health?.sha ?? null, builtAt: health?.builtAt ?? null }) ? { staleBuild: true } : {}),
+    ...(health?.cheap === 'down' ? { cheapDown: true } : {}),
+  };
   if (healthy && existsSync(dbPath)) {
     try {
       const db = openTelemetryDb(dbPath, { readonly: true });
@@ -27,7 +49,13 @@ export async function statusLine({ dbPath, healthUrl, sessionId }: StatusLineOpt
         midnight.setHours(0, 0, 0, 0);
         const last = lastRoute(db, sessionId);
         const context = sessionContext(db, sessionId);
-        data = { healthy, ...(last ? { last } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
+        let quota: ReturnType<typeof latestQuota>;
+        try {
+          quota = latestQuota(db);
+        } catch {
+          // Database not migrated yet (old router still running): no quota to show.
+        }
+        data = { ...data, ...(last ? { last } : {}), ...(quota ? { quota } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
       } finally {
         db.close();
       }
@@ -38,12 +66,18 @@ export async function statusLine({ dbPath, healthUrl, sessionId }: StatusLineOpt
   return renderStatusLine(data);
 }
 
-async function probeHealth(url: string): Promise<boolean> {
+/** The /healthz body when the router answers ok; undefined when it is down. */
+async function probeHealth(url: string): Promise<Health | undefined> {
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS) });
-    return res.ok;
+    if (!res.ok) return undefined;
+    try {
+      return (await res.json()) as Health;
+    } catch {
+      return {};
+    }
   } catch {
-    return false;
+    return undefined;
   }
 }
 

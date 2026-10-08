@@ -4,11 +4,32 @@ import type { FinalProvider, Outcome } from './schema.js';
 /** What the Claude Code status line needs: is the router up, and where did this session's last turn go. */
 export interface StatusLineData {
   readonly healthy: boolean;
+  /** The build on disk is newer than the one running: someone forgot `jev-router reload`. */
+  readonly staleBuild?: boolean;
+  /** The router's health check sees the cheap provider down: cheap turns go to Claude. */
+  readonly cheapDown?: boolean;
   readonly last?: LastRoute;
   /** Today's routed turns (see cheapShare), and how many the cheap model answered. */
   readonly today?: { readonly cheap: number; readonly total: number };
   /** Context of the session's last main-agent request (input + cache), in tokens. */
   readonly context?: number;
+  /** Binding Claude quota window, as last persisted by the router. */
+  readonly quota?: { readonly utilization: number; readonly window: string };
+}
+
+/** From here the router lowers its cheap bars (QUOTA_PRESSURE default), so the line warns too. */
+export const QUOTA_WARN = 0.8;
+
+/** Latest persisted quota reading; older than `maxAgeMs` is stale and not shown. */
+export function latestQuota(
+  db: TelemetryDb,
+  { now = Date.now(), maxAgeMs = 6 * 3_600_000 } = {},
+): { utilization: number; window: string; createdAt: Date } | undefined {
+  const row = db
+    .prepare(`SELECT utilization, window, created_at AS createdAt FROM quota_observations ORDER BY id DESC LIMIT 1`)
+    .get() as { utilization: number; window: string; createdAt: number } | undefined;
+  if (!row || now - row.createdAt > maxAgeMs) return undefined;
+  return { utilization: row.utilization, window: row.window, createdAt: new Date(row.createdAt) };
 }
 
 /**
@@ -83,11 +104,13 @@ export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total
 }
 
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
-export function renderStatusLine({ healthy, last, today, context }: StatusLineData): string {
+export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, context, quota }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
   const parts = ['jev-router ✓'];
+  if (staleBuild) parts.push('⚠ build velho');
+  if (cheapDown) parts.push('cheap ✗');
   if (last) {
-    const where = last.provider === 'openai' ? 'cheap' : 'claude';
+    const where = last.provider === 'openai' ? 'cheap' : last.provider === 'gemini' ? 'gemini' : 'claude';
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
     parts.push(`last: ${where} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
   }
@@ -96,5 +119,9 @@ export function renderStatusLine({ healthy, last, today, context }: StatusLineDa
     parts.push(context >= CONTEXT_WARN_TOKENS ? `⚠ ${k} → /compact or /clear` : k);
   }
   if (today && today.total > 0) parts.push(`today ${today.cheap}/${today.total} cheap`);
+  if (quota) {
+    const q = `cota ${Math.round(quota.utilization * 100)}% ${quota.window}`;
+    parts.push(quota.utilization >= QUOTA_WARN ? `⚠ ${q}` : q);
+  }
   return parts.join(' · ');
 }

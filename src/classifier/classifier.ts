@@ -16,6 +16,7 @@ export type Classification = ComplexityDistribution & {
   readonly risk?: number;
   /** Versioned model that answered (an alias like `jev-latest` resolves to it). */
   readonly model?: string;
+  readonly textOnly?: number;
 };
 
 /**

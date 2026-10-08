@@ -17,6 +17,7 @@ describe('JevClassifier', () => {
   let url: string;
   let lastRequest: { headers: IncomingMessage['headers']; body: any } | undefined;
   let status = 200;
+  let omitInspection = false;
 
   before(async () => {
     server = createServer(async (req, res) => {
@@ -37,6 +38,7 @@ describe('JevClassifier', () => {
                   },
                   security_sensitive: { type: 'noul', noul: 0.03 },
                   destructive_or_production: { type: 'noul', noul: 0.97 },
+                  ...(omitInspection ? {} : { requires_inspection: { type: 'noul', noul: 0.2 } }),
                 },
                 usage: { input_tokens: 453, output_tokens: 20 },
               }
@@ -67,7 +69,16 @@ describe('JevClassifier', () => {
     const scores = await jev.classify(input, AbortSignal.timeout(1_000));
     assert.equal(lastRequest?.body.questions.security_sensitive.type, 'noul');
     assert.equal(lastRequest?.body.questions.destructive_or_production.type, 'noul');
+    assert.equal(lastRequest?.body.questions.requires_inspection.type, 'noul');
+    assert.match(lastRequest?.body.questions.requires_inspection.instructions, /current state/);
     assert.equal(scores.risk, 0.97);
+  });
+
+  it('fails toward primary when the inspection Noul is missing from the answer', async () => {
+    omitInspection = true;
+    const jev = new JevClassifier({ apiUrl: url, apiKey: 'ts_test', model: 'jev-latest' });
+    await assert.rejects(jev.classify(input, AbortSignal.timeout(1_000)), /requires_inspection/);
+    omitInspection = false;
   });
 
   it('reports the JEV token usage and the model version that answered', async () => {
@@ -87,7 +98,7 @@ describe('JevClassifier', () => {
 
 describe('jevContractIssues', () => {
   const answer = (probabilities: unknown) => ({
-    answers: { task_complexity: { probabilities }, security_sensitive: { noul: 0 }, destructive_or_production: { noul: 0 } },
+    answers: { task_complexity: { probabilities }, security_sensitive: { noul: 0 }, destructive_or_production: { noul: 0 }, requires_inspection: { noul: 0 } },
   });
 
   it('accepts three levels that sum to 1', () => {

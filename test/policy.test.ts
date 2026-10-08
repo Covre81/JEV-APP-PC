@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { parseJevRisk } from '../src/classifier/jev-classifier.js';
 import { toDistribution } from '../src/domain/complexity.js';
-import { selectRoute, stickyRoute } from '../src/domain/policy.js';
+import { selectRoute, selectTier, stickyRoute, stickyTier } from '../src/domain/policy.js';
 
 const options = { minCheapProbability: 0.8, standardRoute: 'primary' } as const;
 
@@ -31,6 +32,57 @@ describe('selectRoute risk veto', () => {
     assert.equal(selectRoute({ ...d, risk: 0.94 }, options), 'primary');
     assert.equal(selectRoute({ ...d, risk: 0.15 }, options), 'cheap');
     assert.equal(selectRoute(d, options), 'cheap');
+  });
+
+  it('vetoes a simple-looking question that needs the repository to answer ("is everything ok here?")', () => {
+    const answer = (inspection: number) => ({
+      answers: {
+        security_sensitive: { noul: 0.02 },
+        destructive_or_production: { noul: 0.03 },
+        requires_inspection: { noul: inspection },
+      },
+    });
+    const d = { simple: 0.91, standard: 0.07, structural: 0.02 };
+    assert.equal(selectRoute({ ...d, risk: parseJevRisk(answer(0.88)) }, options), 'primary');
+    assert.equal(selectRoute({ ...d, risk: parseJevRisk(answer(0.1)) }, options), 'cheap', 'the facts are in the prompt');
+  });
+});
+
+describe('selectTier', () => {
+  const tiers = { ...options, minCheapProbability: 0.9, standardEnabled: true, minStandardProbability: 0.75 } as const;
+
+  it('sends confident simple work to the trivial tier, simple+standard mass to the standard tier, the rest to primary', () => {
+    assert.equal(selectTier({ simple: 0.93, standard: 0.05, structural: 0.02 }, tiers), 'trivial');
+    assert.equal(selectTier({ simple: 0.5, standard: 0.3, structural: 0.2 }, tiers), 'standard');
+    assert.equal(selectTier({ simple: 0.3, standard: 0.3, structural: 0.4 }, tiers), 'primary');
+  });
+
+  it('lets the risk veto beat every tier', () => {
+    assert.equal(selectTier({ simple: 0.5, standard: 0.45, structural: 0.05, risk: 0.6 }, tiers), 'primary');
+    assert.equal(selectTier({ simple: 0.99, standard: 0.01, structural: 0, risk: 0.6 }, tiers), 'primary');
+  });
+
+  it('behaves like before when the standard tier is off', () => {
+    const off = { ...tiers, standardEnabled: false };
+    assert.equal(selectTier({ simple: 0.5, standard: 0.45, structural: 0.05 }, off), 'primary');
+    assert.equal(selectTier({ simple: 0.5, standard: 0.45, structural: 0.05 }, { ...off, standardRoute: 'cheap' }), 'trivial');
+    assert.equal(selectRoute({ simple: 0.5, standard: 0.45, structural: 0.05 }, tiers), 'cheap', 'selectRoute still says cheap');
+  });
+});
+
+describe('stickyTier', () => {
+  it('only moves up: trivial < standard < primary', () => {
+    assert.equal(stickyTier('trivial', 'standard'), 'standard');
+    assert.equal(stickyTier('standard', 'trivial'), 'standard');
+    assert.equal(stickyTier('standard', 'primary'), 'primary');
+    assert.equal(stickyTier('primary', 'trivial'), 'primary');
+  });
+
+  it('is total and keeps gemini out of ranking', () => {
+    assert.equal(stickyTier('gemini', 'trivial'), 'trivial');
+    assert.equal(stickyTier('standard', 'gemini'), 'standard');
+    assert.equal(stickyTier('gemini', 'primary'), 'primary');
+    assert.equal(stickyTier('gemini', 'gemini'), 'primary');
   });
 });
 

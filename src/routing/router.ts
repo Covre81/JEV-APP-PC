@@ -1,13 +1,15 @@
 import type { Classification, ComplexityClassifier } from '../classifier/classifier.js';
 import type { ComplexityDistribution } from '../domain/complexity.js';
-import { selectRoute, stickyRoute, type PolicyOptions, type Route } from '../domain/policy.js';
+import { selectTier, stickyTier, tierRoute, geminiEligible, type PolicyOptions, type Route, type Tier } from '../domain/policy.js';
 import {
   conversationFingerprint,
   estimateInputTokens,
   isFreshConversation,
   latestHumanText,
+  hasImageDocumentOrToolChoice,
   type MessagesBody,
 } from './messages-body.js';
+import type { QuotaLevel } from '../quota.js';
 import type { TtlLruStore } from './session-store.js';
 
 export type RouteReason =
@@ -17,12 +19,25 @@ export type RouteReason =
   | 'sticky'
   | 'classified'
   | 'escalated'
+  | 'escalated:standard'
   | 'escalated:context'
   | 'failover:cheap-unavailable'
-  | 'failover:primary-rate-limited';
+  | 'skipped:cheap-unhealthy'
+  | 'pinned:compaction'
+  | 'quota:pressure'
+  | 'quota:reclassified'
+  | 'failover:primary-rate-limited'
+  | 'gemini:text-only'
+  | 'gemini:text-only:pressure'
+  | 'skipped:gemini-unhealthy'
+  | 'skipped:gemini-busy'
+  | 'failover:gemini-unavailable';
 
 export interface RouteDecision {
   readonly route: Route;
+  /** Which cheap model serves a cheap route; absent on decisions built outside the router. */
+  readonly tier?: Tier;
+  readonly fallbackTier?: Tier;
   readonly reason: RouteReason;
   readonly conversationKey: string | undefined;
   readonly distribution?: Classification;
@@ -44,11 +59,21 @@ export interface RouterOptions {
   readonly policy: PolicyOptions;
   /** x-claude-code-request-class values that always use the primary provider. */
   readonly primaryClasses: ReadonlySet<string>;
-  /** Input-token budget of the cheap model (its context window minus headroom). */
+  /** Input-token budget of the trivial-tier model (its context window minus headroom). */
   readonly cheapContextTokens: number;
+  /** Input-token budget of the standard-tier model; defaults to the trivial one. */
+  readonly standardContextTokens?: number;
   readonly classifierTimeoutMs: number;
   readonly classifierMaxChars: number;
+  /** Claude quota as last seen on an Anthropic response; absent = quota routing off. */
+  readonly quota?: { level(): QuotaLevel };
+  /** Bars used from `pressure` on; each only lowers the normal one. */
+  readonly pressurePolicy?: { readonly minCheapProbability: number; readonly minStandardProbability: number };
+  readonly geminiPolicy?: import('../domain/policy.js').GeminiPolicyOptions;
+  readonly geminiFromPrimary?: boolean;
 }
+
+const TIER_RANK: Readonly<Record<Exclude<Tier, 'gemini'>, number>> = { trivial: 0, standard: 1, primary: 2 };
 
 /**
  * Multi-provider router: decides, per conversation, between a cheap
@@ -59,14 +84,15 @@ export interface RouterOptions {
  *   - a fresh (or just-compacted) conversation is classified by JEV;
  *   - tool-result continuations reuse the conversation's route (no JEV call);
  *   - a new human turn on the cheap route is re-classified and may escalate;
- *   - primary is terminal: conversations never fall back to cheap;
+ *   - primary is terminal, except under critical quota, where a new human
+ *     turn may leave it (and a compaction no longer pins it there);
  *   - anything the cheap model cannot hold (context) goes primary;
  *   - JEV failure fails toward primary — losing savings, never correctness.
  */
 export class Router {
   constructor(
     private readonly classifier: ComplexityClassifier,
-    private readonly sessions: TtlLruStore<Route>,
+    private readonly sessions: TtlLruStore<Tier>,
     private readonly options: RouterOptions,
   ) {}
 
@@ -80,29 +106,59 @@ export class Router {
       : `fp:${conversationFingerprint(ctx.body)}`;
     const fresh = isFreshConversation(ctx.body) || ctx.contextCompacted;
     const inputTokens = estimateInputTokens(ctx.rawByteLength);
-    const fitsCheap = inputTokens <= this.options.cheapContextTokens;
+    const budget: Readonly<Record<Tier, number>> = {
+      trivial: this.options.cheapContextTokens,
+      standard: this.options.standardContextTokens ?? this.options.cheapContextTokens,
+      primary: Infinity,
+      gemini: Infinity,
+    };
 
-    const resolve = (route: Route, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
-      const escalatedByContext = route === 'cheap' && !fitsCheap;
-      const final: Route = escalatedByContext ? 'primary' : route;
+    const resolve = (tier: Tier, reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => {
+      const escalatedByContext = inputTokens > budget[tier];
+      const final: Tier = escalatedByContext ? 'primary' : tier;
       this.sessions.set(key, final);
-      return { ...extra, route: final, reason: escalatedByContext ? 'escalated:context' : reason, conversationKey: key };
+      return {
+        ...extra,
+        route: tierRoute(final),
+        tier: final,
+        reason: escalatedByContext ? 'escalated:context' : reason,
+        conversationKey: key,
+      };
     };
     const primary = (reason: RouteReason, extra: Partial<RouteDecision> = {}): RouteDecision => ({
       ...extra,
       route: 'primary',
+      tier: 'primary',
       reason,
       conversationKey: key,
     });
 
+    const level = this.options.quota?.level() ?? 'none';
+    const pressure = this.options.pressurePolicy;
+    const policy: PolicyOptions =
+      level === 'none' || !pressure
+        ? this.options.policy
+        : {
+            ...this.options.policy,
+            minCheapProbability: Math.min(this.options.policy.minCheapProbability, pressure.minCheapProbability),
+            minStandardProbability: Math.min(this.options.policy.minStandardProbability ?? 1, pressure.minStandardProbability),
+          };
+
     // A conversation we hold no state for (proxy restart, TTL expiry) has been
     // running on the primary: keep it there rather than switching mid-flight.
-    const sticky: Route | undefined = fresh ? undefined : (this.sessions.get(key) ?? 'primary');
-
-    if (sticky === 'primary') return resolve('primary', 'sticky');
+    const stored: Tier = this.sessions.get(key) ?? 'primary';
+    // Compaction used to count as a fresh start, dropping long Claude sessions on the 20B.
+    if (ctx.contextCompacted && stored === 'primary' && level !== 'critical') return resolve('primary', 'pinned:compaction');
+    const sticky: Tier | undefined = (fresh || stored === 'gemini') ? undefined : stored;
 
     const humanText = latestHumanText(ctx.body);
+    // Quota nearly gone: a new human turn on Claude may leave it. Tool loops never do.
+    const reclassify = level === 'critical' && humanText !== undefined && stored === 'primary' && (sticky === 'primary' || ctx.contextCompacted);
+    const classifyForGemini = this.options.geminiPolicy?.enabled && this.options.geminiFromPrimary && humanText !== undefined && sticky === 'primary' && !reclassify;
+
+    if (sticky === 'primary' && !reclassify && !classifyForGemini) return resolve('primary', 'sticky');
     if (humanText === undefined) {
+      if (stored === 'gemini') return primary('sticky');
       return sticky ? resolve(sticky, 'sticky') : primary('passthrough:no-session-state');
     }
 
@@ -121,15 +177,66 @@ export class Router {
     } catch (err) {
       // An unscored human turn may be structural: fail toward primary even mid-conversation.
       const classifierError = err instanceof Error ? err.message : String(err);
+      if (classifyForGemini) {
+        return resolve('primary', 'sticky', { classifierError });
+      }
       return resolve('primary', 'passthrough:classifier-failed', { classifierError });
     }
     const classifierMs = Math.round(performance.now() - started);
 
-    const proposed = selectRoute(distribution, this.options.policy);
-    if (!sticky) return resolve(proposed, 'classified', { distribution, classifierMs });
+    // The risk veto runs inside selectTier, before any bar: no quota level moves a risky turn.
+    const proposed = selectTier(distribution, policy);
+    const extra = { distribution, classifierMs };
 
-    const next = stickyRoute(sticky, proposed);
-    return resolve(next, next === sticky ? 'sticky' : 'escalated', { distribution, classifierMs });
+    let isGeminiEligible = false;
+    if (this.options.geminiPolicy && !hasImageDocumentOrToolChoice(ctx.body)) {
+      const effectiveProposedForGemini = classifyForGemini ? 'primary' : proposed;
+      isGeminiEligible = geminiEligible(distribution, effectiveProposedForGemini, this.options.geminiPolicy, level);
+    }
+
+    if (isGeminiEligible) {
+      let nextStored: Tier;
+      if (fresh || stored === 'gemini') {
+        nextStored = 'gemini';
+      } else if (stored === 'primary') {
+        nextStored = 'primary';
+      } else {
+        nextStored = stickyTier(sticky!, proposed);
+      }
+      this.sessions.set(key, nextStored);
+
+      const gp = this.options.geminiPolicy!;
+      const barLowered = level !== 'none' && gp.pressureMinTextOnly < gp.minTextOnly;
+      const isPressure = barLowered && distribution.textOnly! < gp.minTextOnly;
+      return {
+        ...extra,
+        route: 'gemini',
+        tier: 'gemini',
+        fallbackTier: nextStored === 'gemini' ? 'primary' : nextStored,
+        reason: isPressure ? 'gemini:text-only:pressure' : 'gemini:text-only',
+        conversationKey: key,
+      };
+    }
+
+    if (classifyForGemini) {
+      return resolve('primary', 'sticky', extra);
+    }
+
+    if (reclassify) return resolve(proposed, proposed === 'primary' ? 'sticky' : 'quota:reclassified', extra);
+    if (!sticky) {
+      let lowered = false;
+      if (policy !== this.options.policy) {
+         const normalProposed = selectTier(distribution, this.options.policy);
+         if (normalProposed !== 'gemini' && proposed !== 'gemini') {
+            lowered = TIER_RANK[proposed] < TIER_RANK[normalProposed];
+         }
+      }
+      return resolve(proposed, lowered ? 'quota:pressure' : 'classified', extra);
+    }
+
+    const next = stickyTier(sticky, proposed);
+    const reason: RouteReason = next === sticky ? 'sticky' : next === 'standard' ? 'escalated:standard' : 'escalated';
+    return resolve(next, reason, extra);
   }
 
   /** The cheap provider could not serve this conversation: keep it on the primary from now on. */

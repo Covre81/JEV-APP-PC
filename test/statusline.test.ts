@@ -97,6 +97,31 @@ describe('statusline', () => {
     }
   });
 
+  it('warns when the running router is older than the build on disk, and when cheap is down', async () => {
+    const running = { sha: 'aaaaaaaaaaaa', builtAt: '2026-10-07T10:00:00.000Z' };
+    const router = createServer((_req, res) =>
+      void res.writeHead(200).end(JSON.stringify({ ok: true, ...running, cheap: 'down' })),
+    );
+    await new Promise<void>((r) => router.listen(0, '127.0.0.1', r));
+    try {
+      const url = `http://127.0.0.1:${(router.address() as AddressInfo).port}/healthz`;
+      const missing = join(tmpdir(), 'missing-jev.db');
+      assert.equal(
+        await statusLine({ dbPath: missing, healthUrl: url, localBuild: { ...running, sha: 'bbbbbbbbbbbb' } }),
+        'jev-router ✓ · ⚠ build velho · cheap ✗',
+      );
+      assert.equal(await statusLine({ dbPath: missing, healthUrl: url, localBuild: running }), 'jev-router ✓ · cheap ✗');
+    } finally {
+      router.closeAllConnections();
+      await new Promise<void>((r) => router.close(() => r()));
+    }
+  });
+
+  it('shows the binding Claude quota window, with a warning from 80% on', () => {
+    assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.42, window: '5h' } }), 'jev-router ✓ · cota 42% 5h');
+    assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.82, window: '5h' } }), 'jev-router ✓ · ⚠ cota 82% 5h');
+  });
+
   it('flags a last turn that did not end ok', () => {
     assert.equal(
       renderStatusLine({ healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error', pSimple: 0.9 } }),

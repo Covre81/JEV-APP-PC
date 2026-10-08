@@ -1,3 +1,6 @@
+import type { QuotaSnapshot } from '../quota.js';
+import type { TelemetryDb } from './db.js';
+
 /** JEV's System One verdict for the turn that set the route (null when JEV was not consulted). */
 export interface JevDecision {
   /** Full distribution over the three ordinal levels. */
@@ -18,7 +21,7 @@ export interface JevDecision {
   readonly model?: string | null;
 }
 
-export type FinalProvider = 'anthropic' | 'openai';
+export type FinalProvider = 'anthropic' | 'openai' | 'gemini';
 
 /**
  * Outcome of the exchange as seen by the client:
@@ -58,6 +61,32 @@ export interface RouterLog {
   readonly latencyMs: number;
   /** The cheap provider failed before answering and the request fell back to Anthropic. */
   readonly fallbackTriggered: boolean;
+  /** Tools the client offered (`body.tools`); null on rows written before it was recorded. */
+  readonly toolsOffered: number | null;
+  /** `tool_use` blocks in the response. */
+  readonly toolCalls: number | null;
+  /**
+   * Cheap-route answer, delivered ok, that called none of the tools it was
+   * offered: the misroute signal ("is everything ok here?" answered without
+   * looking). Null on Anthropic rows, where it says nothing.
+   */
+  readonly inspectionMiss: boolean | null;
+  /** Binding Claude quota window (0..1) when the exchange was routed; null when none was seen yet. */
+  readonly quotaUtilization: number | null;
+  readonly ccSessionId?: string | null;
+  readonly agentType?: string | null;
+  readonly promptId?: string | null;
+  readonly compaction?: string | null;
+  readonly systemHash?: string | null;
+  readonly toolsHash?: string | null;
+  readonly systemChars?: number | null;
+  readonly toolsChars?: number | null;
+  readonly maxTokens?: number | null;
+  readonly thinkingType?: string | null;
+  readonly thinkingBudget?: number | null;
+  readonly effort?: string | null;
+  readonly cacheWrite5mTokens?: number | null;
+  readonly cacheWrite1hTokens?: number | null;
 }
 
 export type NewRouterLog = Pick<RouterLog, 'createdAt' | 'finalProvider' | 'routeReason' | 'outcome' | 'latencyMs'> &
@@ -88,16 +117,94 @@ export const MIGRATIONS: readonly string[] = [
   CREATE INDEX router_logs_prompt_hash_idx ON router_logs (human_prompt_hash);`,
   `ALTER TABLE router_logs ADD requested_model text;
   ALTER TABLE router_logs ADD cache_write_tokens integer;`,
+  `ALTER TABLE router_logs ADD tools_offered integer;
+  ALTER TABLE router_logs ADD tool_calls integer;
+  ALTER TABLE router_logs ADD inspection_miss integer;`,
+  `CREATE TABLE quota_observations (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at integer NOT NULL,
+    utilization real NOT NULL,
+    window text NOT NULL,
+    status text,
+    reset_at integer
+  );
+  ALTER TABLE router_logs ADD quota_utilization real;`,
+  `CREATE TABLE context_runs (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    created_at integer DEFAULT (unixepoch('subsec') * 1000) NOT NULL,
+    session_id text NOT NULL,
+    prompt text NOT NULL,
+    mode text NOT NULL,
+    outcome text NOT NULL,
+    pipeline_version text NOT NULL,
+    injected integer DEFAULT 0 NOT NULL,
+    injected_chars integer DEFAULT 0 NOT NULL
+  );
+  CREATE TABLE context_candidates (
+    id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+    run_id integer NOT NULL,
+    type text NOT NULL,
+    path text NOT NULL,
+    title text,
+    content text NOT NULL,
+    p real NOT NULL CHECK (p BETWEEN 0 AND 1),
+    injected integer DEFAULT 0 NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES context_runs (id) ON DELETE CASCADE
+  );
+  CREATE INDEX context_runs_session_id_idx ON context_runs (session_id);
+  CREATE INDEX context_candidates_run_id_idx ON context_candidates (run_id);`,
+  // The context hook stored the prompt itself, which may carry pasted secrets: keep a hash
+  // and the length, as router_logs does, and record why a run failed and how long it took.
+  `ALTER TABLE context_runs DROP COLUMN prompt;
+  ALTER TABLE context_runs ADD prompt_hash text;
+  ALTER TABLE context_runs ADD prompt_chars integer;
+  ALTER TABLE context_runs ADD latency_ms integer;
+  ALTER TABLE context_runs ADD error text;`,
+  `ALTER TABLE router_logs ADD cc_session_id text;
+  ALTER TABLE router_logs ADD agent_type text;
+  ALTER TABLE router_logs ADD prompt_id text;
+  ALTER TABLE router_logs ADD compaction text;
+  ALTER TABLE router_logs ADD system_hash text;
+  ALTER TABLE router_logs ADD tools_hash text;
+  ALTER TABLE router_logs ADD system_chars integer;
+  ALTER TABLE router_logs ADD tools_chars integer;
+  ALTER TABLE router_logs ADD max_tokens integer;
+  ALTER TABLE router_logs ADD thinking_type text;
+  ALTER TABLE router_logs ADD thinking_budget integer;
+  ALTER TABLE router_logs ADD effort text;
+  ALTER TABLE router_logs ADD cache_write_5m_tokens integer;
+  ALTER TABLE router_logs ADD cache_write_1h_tokens integer;`,
 ];
+
+/**
+ * One row per meaningful quota change (QuotaStore.onChange): the status line
+ * runs in another process and reads the latest one.
+ */
+export function recordQuota(db: TelemetryDb, s: QuotaSnapshot): void {
+  db.prepare(
+    `INSERT INTO quota_observations (created_at, utilization, window, status, reset_at)
+     VALUES (@createdAt, @utilization, @window, @status, @resetAt)`,
+  ).run({
+    createdAt: s.observedAt.getTime(),
+    utilization: s.utilization,
+    window: s.window,
+    status: s.status ?? null,
+    resetAt: s.resetAt?.getTime() ?? null,
+  });
+}
 
 export const INSERT_ROUTER_LOG = `INSERT INTO router_logs (
   created_at, session_id, human_prompt_hash, jev_decision, final_provider, model, requested_model, route_reason,
   request_class, http_status, outcome, tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, latency_ms,
-  fallback_triggered
+  fallback_triggered, tools_offered, tool_calls, inspection_miss, quota_utilization,
+  cc_session_id, agent_type, prompt_id, compaction, system_hash, tools_hash, system_chars, tools_chars,
+  max_tokens, thinking_type, thinking_budget, effort, cache_write_5m_tokens, cache_write_1h_tokens
 ) VALUES (
   @createdAt, @sessionId, @humanPromptHash, @jevDecision, @finalProvider, @model, @requestedModel, @routeReason,
   @requestClass, @httpStatus, @outcome, @tokensIn, @tokensOut, @cacheReadTokens, @cacheWriteTokens, @latencyMs,
-  @fallbackTriggered
+  @fallbackTriggered, @toolsOffered, @toolCalls, @inspectionMiss, @quotaUtilization,
+  @ccSessionId, @agentType, @promptId, @compaction, @systemHash, @toolsHash, @systemChars, @toolsChars,
+  @maxTokens, @thinkingType, @thinkingBudget, @effort, @cacheWrite5mTokens, @cacheWrite1hTokens
 )`;
 
 /** Named parameters for INSERT_ROUTER_LOG: dates as epoch ms, JSON as text, booleans as 0/1. */
@@ -119,4 +226,22 @@ export const insertParams = (r: NewRouterLog) => ({
   cacheWriteTokens: r.cacheWriteTokens ?? null,
   latencyMs: r.latencyMs,
   fallbackTriggered: r.fallbackTriggered ? 1 : 0,
+  toolsOffered: r.toolsOffered ?? null,
+  toolCalls: r.toolCalls ?? null,
+  inspectionMiss: r.inspectionMiss == null ? null : r.inspectionMiss ? 1 : 0,
+  quotaUtilization: r.quotaUtilization ?? null,
+  ccSessionId: r.ccSessionId ?? null,
+  agentType: r.agentType ?? null,
+  promptId: r.promptId ?? null,
+  compaction: r.compaction ?? null,
+  systemHash: r.systemHash ?? null,
+  toolsHash: r.toolsHash ?? null,
+  systemChars: r.systemChars ?? null,
+  toolsChars: r.toolsChars ?? null,
+  maxTokens: r.maxTokens ?? null,
+  thinkingType: r.thinkingType ?? null,
+  thinkingBudget: r.thinkingBudget ?? null,
+  effort: r.effort ?? null,
+  cacheWrite5mTokens: r.cacheWrite5mTokens ?? null,
+  cacheWrite1hTokens: r.cacheWrite1hTokens ?? null,
 });

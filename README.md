@@ -29,8 +29,9 @@ only on work that needs Claude**.
 
 | Route | Provider | Billing | Gets |
 |---|---|---|---|
-| `cheap` | Any OpenAI-compatible API (default: Ollama Cloud `gpt-oss:20b-cloud`) | Free plan with usage limits, or per token on Groq/OpenRouter | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
-| `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Also level 2 by default, plus everything the cheap route can't carry |
+| `cheap`, trivial tier | Any OpenAI-compatible API (default: Ollama Cloud `gpt-oss:20b-cloud`, `CHEAP_MODEL`) | Free plan with usage limits, or per token on Groq/OpenRouter | JEV level 1, the simple tasks: questions, explanations, one-file edits, renames, docstrings |
+| `cheap`, standard tier | Same endpoint, bigger model (default `gemma4:31b-cloud`, `CHEAP_MODEL_STANDARD`; `off` disables it) | Same | Level 2, standard feature work, when it carries no risk |
+| `primary` | Anthropic, with whatever model the client picked | Your Claude quota or API key | Level 3, structural work: Clean Architecture refactors, heavy test design, concurrency, security and performance. Plus everything the cheap route can't carry |
 
 **Rules.**
 
@@ -38,15 +39,25 @@ only on work that needs Claude**.
    question, and the router gets the probability distribution
    `{simple, standard, structural}`.
 2. **The cheap route needs confidence, not just a majority.** A task goes
-   cheap only when `P(simple) ≥ ROUTER_MIN_CHEAP_PROBABILITY` (default 0.8).
-   It does not use the most likely level: `{.45, .30, .25}` has "simple" as
-   its top level, but a 55% chance the cheap model is out of its depth.
-   Level 2 stays primary unless `ROUTER_STANDARD_ROUTE=cheap`.
-3. **The route sticks for the whole conversation.**
-   - Tool-result turns of the agent loop reuse the route without calling JEV.
-   - A new human turn on the cheap route is re-classified and may escalate.
+   to the trivial tier only when `P(simple) ≥ ROUTER_MIN_CHEAP_PROBABILITY`
+   (default 0.9). It does not use the most likely level: `{.45, .30, .25}`
+   has "simple" as its top level, but a 55% chance the small model is out of
+   its depth. That turn goes to the standard tier instead when
+   `P(simple) + P(standard) ≥ ROUTER_MIN_STANDARD_PROBABILITY` (default
+   0.75), and to Anthropic otherwise. With `CHEAP_MODEL_STANDARD=off`, level
+   2 stays primary unless the legacy `ROUTER_STANDARD_ROUTE=cheap`.
+3. **The tier sticks for the whole conversation, and only moves up**
+   (trivial → standard → primary).
+   - Tool-result turns of the agent loop reuse the tier without calling JEV.
+   - A new human turn on a cheap tier is re-classified and may escalate
+     (`escalated:standard`, `escalated`).
    - Primary is terminal: going back down would throw away the Anthropic
-     cache, and the next escalation would pay to rebuild it.
+     cache, and the next escalation would pay to rebuild it. The one
+     exception is critical quota (rule 5).
+   - Compaction does not reopen the cheap route: a session on Claude stays
+     there after `/compact` (`pinned:compaction`).
+   - Each tier has its own context budget (`CHEAP_CONTEXT_TOKENS`,
+     `CHEAP_STANDARD_CONTEXT_TOKENS`); past it, the turn goes primary.
 4. **Failure only ever moves work up to Anthropic.**
    - The request can't be translated (images, documents, server tools): primary.
    - The request is larger than the cheap model's context budget: primary.
@@ -57,15 +68,38 @@ only on work that needs Claude**.
      re-sends the turn as a non-streaming request). The pin does not cover a
      break on a conversation's first turn: that retry is re-classified.
    - JEV fails or times out: primary.
-5. **Quota failover in the other direction is opt-in**
-   (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`). When Anthropic answers 429 or 529,
-   the request is retried on the cheap provider. It's off by default because
-   it silently hands structural work to a 20B model. Turn it on only if you
-   prefer a degraded answer to waiting.
+5. **The Claude quota opens the cheap route when it runs low**
+   (`QUOTA_ROUTING=true`). Every Anthropic response carries the quota
+   (`anthropic-ratelimit-unified-5h-*`, `-7d-*`, …); the router keeps the
+   window closest to its limit.
+   - From `QUOTA_PRESSURE` (80%) on, the cheap bars drop to
+     `QUOTA_PRESSURE_MIN_CHEAP` (0.7) and `QUOTA_PRESSURE_MIN_STANDARD` (0.6)
+     for new turns and subagents (`quota:pressure`). Auxiliary traffic stays
+     on Claude.
+   - From `QUOTA_CRITICAL` (95%) on, a new human turn of a session pinned to
+     Claude is re-classified and may go cheap (`quota:reclassified`); it then
+     stays there, because going back would rebuild the Claude cache. The
+     next structural turn escalates as usual.
+   - When Anthropic answers 429 or 529, the request is retried on the cheap
+     provider (`FAILOVER_ON_PRIMARY_RATE_LIMIT=true`, now the default): a
+     degraded answer instead of a dead session.
+   - The risk veto (rule 7) is checked before any of this, at every level.
 6. **Some Claude Code traffic always stays primary**
    (`ROUTER_PRIMARY_CLASSES=auxiliary,compaction`). Claude Code's
    `auxiliary` class includes the auto-mode safety classifier, and compaction
    summaries need the strong model.
+7. **Risk vetoes the cheap route, always.** The same JEV call asks three
+   yes/no Nouls; if any is ≥ 0.5 the turn stays on Anthropic, however simple
+   it looks:
+   - `security_sensitive`: auth, password hashing, tokens, crypto, secrets;
+   - `destructive_or_production`: deletes data, migrations, production;
+   - `requires_inspection`: a verdict or report on the project's state
+     ("is everything ok here?", "summarize what changed") that needs the
+     repository investigated first. The 20B answered both of those without
+     looking. Edits, named commands and explaining pasted code are excluded.
+   A response missing any of the three fails toward Anthropic.
+   `jev-router stats` counts cheap answers that called none of the tools
+   they were offered (**inspection miss**): the misroutes the veto missed.
 
 **Consequences.**
 
@@ -88,12 +122,48 @@ only on work that needs Claude**.
   showing the model you picked. The truth is in the `x-jev-route` response
   header and the `route decision` log line.
 
+## Gemini tier (Antigravity CLI subscription)
+
+The router can optionally divert medium-to-hard, text-only turns to Gemini using the user's Google subscription via the Antigravity CLI (`agy`) as a child process. This spares the Claude quota for work that needs it, without requiring a separate API key.
+
+- **Scope**: Text-only turns (explanations, design discussions, planning, conceptual Q&A, code reviews) that do not require tool use.
+- **Fail-open**: It is off by default and fails open to Claude (e.g. if the CLI is missing, times out, or the tier is busy).
+- **Latency**: ~6–7 s minimum per turn. The answer arrives all at once (simulated streaming). Real answers take ~25–30 s for a long explanation with gemini-3.1-pro-high (measured), so `GEMINI_TIER_TIMEOUT_MS` may need 90000 for long answers.
+- **API Keys**: The child process is started WITHOUT `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_GENAI_API_KEY`, `GOOGLE_GENAI_USE_VERTEXAI`, `GOOGLE_APPLICATION_CREDENTIALS` and `GOOGLE_CLOUD_PROJECT` (stripped from its environment), so agy always uses the Google account login (subscription) and never an API key.
+- **JEV Question**: Uses the `text_answer_suffices` question to determine if the turn can be fully answered with a written reply without running tools.
+- **Isolation and Safety**: The child process runs with a router-owned `agy` profile (`HOME`/`USERPROFILE`) containing explicit deny rules for all tools (`write_file(*)`, `command(*)`, etc.). The temporary working directory is removed immediately. If the model attempts any tool use, the child process is killed instantly and the turn falls back to Claude.
+
+**Configuration (Environment variables):**
+- `GEMINI_TIER=on` (default: `off`)
+- `GEMINI_TIER_MODEL=gemini-3.1-pro-high`
+- `GEMINI_TIER_BIN` (default: `%LOCALAPPDATA%\agy\bin\agy.exe` on Windows, `agy` elsewhere)
+- `GEMINI_TIER_TIMEOUT_MS=60000`
+- `GEMINI_TIER_MIN_TEXT_ONLY=0.8` (min JEV confidence that a text answer suffices)
+- `GEMINI_TIER_PRESSURE_MIN_TEXT_ONLY=0.6` (bar when Claude quota is pressured)
+- `GEMINI_TIER_FROM_PRIMARY=true` (evaluate text-only human turns even for Claude-pinned sessions. Note: this costs one extra JEV call per human turn of a Claude session)
+- `GEMINI_TIER_MAX_CONCURRENCY=1` (Queueing is skipped: if busy, it fails over to the next tier)
+- `GEMINI_TIER_MAX_PROMPT_CHARS=200000` (Max rendered transcript characters. Older messages are omitted if exceeded)
+- `GEMINI_TIER_BREAKER_FAILURES=3` (Consecutive failures before opening the circuit breaker)
+- `GEMINI_TIER_BREAKER_COOLDOWN_MS=300000` (Cooldown ms before a half-open trial)
+- `GEMINI_TIER_HOME` (Custom HOME/USERPROFILE for the isolated agy profile. Defaults to `<jevHome()>/agy-home`)
+
+**How to enable:**
+1. Ensure `agy` is installed and logged in once interactively.
+2. Set `GEMINI_TIER=on` in your `.env`.
+3. Run `npm run build`.
+4. Run `jev-router reload` (or restart the task).
+5. Check `/healthz` to verify it shows `gemini`.
+6. Watch `jev-router stats`.
+
 ## Repository structure
 
 ```
 src/
-├── cli.ts                         # `jev-router` binary: serve | stats | statusline | help; env-file loading
+├── cli.ts                         # `jev-router` binary: serve | reload | stats | statusline | help; env-file loading
 ├── serve.ts                       # composition root (only file that knows concrete classes)
+├── supervisor.ts                  # reverse proxy over a forked worker: reload without dropping sessions
+├── build-info.ts                  # dist/build-info.json (sha + build time) for /healthz and the status line
+├── quota.ts                       # anthropic-ratelimit-* headers → binding quota window and level
 ├── statusline.ts                  # `jev-router statusline`: health probe + session's last route
 ├── config.ts                      # zod-validated env → typed Config; fails fast at boot
 ├── paths.ts                       # ~/.jev-router (or $JEV_ROUTER_HOME): .env + telemetry.db
@@ -111,6 +181,7 @@ src/
 ├── providers/                     # executes; every provider answers in Anthropic format
 │   ├── provider.ts                # Provider port: response | unavailable
 │   ├── anthropic.ts               # byte-level forwarder (primary)
+│   ├── cheap-health.ts            # polls the cheap provider's /models: skip it while it is down
 │   └── openai/
 │       ├── provider.ts            # OpenAI-compatible provider (cheap)
 │       ├── translate-request.ts   # Anthropic Messages → Chat Completions
@@ -224,6 +295,43 @@ then `./.env`, then `~/.jev-router/.env`. `JEV_ROUTER_HOME` moves the
 `~/.jev-router` directory. After `git pull`, run `npm run build` again; the
 link points at this checkout, so nothing else needs reinstalling.
 
+### Reload without dropping sessions
+
+Every Claude Code session goes through the router, so restarting it used to
+cut them all. `jev-router serve` now runs as a **supervisor**: it owns
+`HOST:PORT`, forks the real gateway as a worker on an ephemeral loopback port,
+and pipes every request to it (unbuffered, so SSE streams flow as written).
+
+```bash
+npm run build
+jev-router reload          # or: node dist/cli.js reload --env .env
+```
+
+`reload` asks the supervisor (loopback-only control port, `CONTROL_PORT`,
+default `PORT + 1`) to start a fresh worker from the new `dist/`. Once it
+listens, new requests go to it; the old worker finishes its open streams and
+is cut after `RELOAD_DRAIN_MS` (default 2 min). The worker re-reads the env
+file, so `.env` changes also apply on `reload`; only `HOST`, `PORT`,
+`CONTROL_PORT` and `RELOAD_DRAIN_MS` belong to the supervisor and need a
+restart. A crashed worker is restarted after 1, 2, 4, 4 and 4 s; after that
+the supervisor answers 503 and waits for a `reload`. A change to
+`supervisor.ts` itself also needs a restart.
+
+`/healthz` reports which build answers:
+`{ok, sha, builtAt, startedAt, pid, cheap, quota}`, where `quota` is the
+last Claude quota reading (`{utilization, window, level, …}`, or null before
+the first Anthropic response) and `cheap` is the cheap
+provider's health (`unknown | up | down`). The build stamps
+`dist/build-info.json` (`git rev-parse --short=12 HEAD` + time). For
+`npm run dev` (tsx watch), set `SUPERVISOR_ENABLED=false`.
+
+**Cheap provider health.** The worker polls `GET {CHEAP_BASE_URL}/models`
+every `CHEAP_HEALTH_INTERVAL_MS` (30 s). While it is `down`, a turn routed
+cheap goes to Anthropic with reason `skipped:cheap-unhealthy`, without
+spending an attempt and without pinning the conversation to Anthropic: it
+returns to cheap once the provider is back. Caveat: Ollama's `/models` proves
+the daemon is up, not that ollama.com serves a `*-cloud` model.
+
 **Cheap provider presets:**
 
 ```bash
@@ -295,7 +403,13 @@ up and where the session's last turn went, add to the same `settings.json`:
 ```
 
 It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
-`jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms. The
+`jev-router ✗ offline` when `/healthz` doesn't answer within 500 ms.
+`⚠ build velho` means `dist/build-info.json` is newer than the build that
+answers `/healthz` (built but not reloaded: run `jev-router reload`);
+`cheap ✗` means the health check sees the cheap provider down.
+`cota 82% 5h` is the binding Claude quota window as the router last saw it
+(`⚠` from 80%, where the cheap bars drop); readings older than 6 h are not
+shown. The
 reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
 asked (`sticky`, `auxiliary`, …). `today 12/40 cheap` counts today's routed
 turns, not requests: main-agent human turns plus every turn JEV scored
@@ -368,6 +482,17 @@ Known limits:
   they had no cache writes;
 - requests whose response carried no `usage` are counted and reported, but
   priced at $0.
+
+
+### Diagnostics (R0)
+
+When `TELEMETRY_DIAGNOSTICS=true` (default: false) is set, the router logs additional metadata into the telemetry database for deep inspection of agent behavior, context management, and rate limits.
+To respect privacy, only hashes (e.g. `system_hash`, `tools_hash`), lengths (`system_chars`), token counts, and header names are stored; full strings, secrets or prompt contents are never recorded.
+
+Additional `jev-router stats` flags are available for diagnostic queries:
+- `--by-class`: aggregates usage and proxy USD costs split by `x-claude-code-request-class` and `requested_model`.
+- `--cache-misses [--min-write N]`: lists every Anthropic turn that incurred a cache write penalty larger than N (default 150000). It breaks down each cache-miss cause (e.g., `first-row-of-session`, `compaction`, `model-switch`, `system-changed`, `tools-changed`, `gap>1h`, `gap5-60m`) and provides a summary.
+- `--daily`: aggregates traffic and USD costs per day, and prints overall task count, median/p90 USD per task, and the top 10 most expensive tasks.
 
 Before tuning `ROUTER_MIN_CHEAP_PROBABILITY`, use the database to measure:
 
@@ -451,6 +576,32 @@ Groq and OpenRouter are both OpenAI-compatible: point `CHEAP_BASE_URL` /
 `CHEAP_API_KEY` / `CHEAP_MODEL` at either one and run `bench.ts`, which already
 streams through the real SSE translation.
 
+## Context Injection Hook (`jev-router context`)
+
+The `jev-router context` hook is a prompt injection hook designed for Claude Code. On every human prompt, it reads `prompt`, `session_id`, `cwd`, and `transcript_path` from `stdin` in JSON format, searches parallel sources (`ai-memory` wiki and `graphify` dependency graphs), ranks items using TypeSafe JEV System One (Stage 1 Choice and Stage 2 Noul-based relevance tests), and outputs prompt context injections.
+
+### Hook Input Format (stdin)
+The hook accepts a JSON object on standard input containing:
+```json
+{
+  "prompt": "help me with standard routing",
+  "session_id": "session-uuid",
+  "cwd": "C:\\Dev\\JEV-APP-PC"
+}
+```
+
+### Hook Output Format (stdout)
+If matching context items are found and `CONTEXT_MODE=inject`, the hook outputs the following JSON to `stdout` containing the additional prompt context:
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "[memória] título (path): trecho\n[grafo] projeto › comunidade: nós"
+  }
+}
+```
+If no items are found, or the mode is set to `shadow` or `off`, the output to `stdout` remains completely empty.
+
 ### Bench history
 
 Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MODEL`, and add a row.
@@ -458,3 +609,5 @@ Run `npx tsx scripts/bench.ts --trials 5 --pad-kb 32` before changing `CHEAP_MOD
 | Date | Model | Trials | Success | Provider failures | Avg trial | Notes |
 |---|---|---|---|---|---|---|
 | 2026-10-04 | `gpt-oss:20b-cloud` | 15 (pad 32 KB, 12 steps) | 93% | 7% (1 `stream_error`) | 6.7 s | 25 schema errors, mostly `Read` with `offset: 0`, which Claude Code accepts (the bench now does too, so they were bench artifacts). A separate 45-trial capture: 0 `stream_error`, 1 `rename` `wrong_result` (import not updated). |
+| 2026-10-07 | `gemma4:31b-cloud` (standard tier, gemma profile) | 6 (`rename` 3 + `fix-bug` 3, pad 16 KB, 12 steps) | 100% | 0% | 3.4 s | 0 tool errors. |
+| 2026-10-07 | `gpt-oss:20b-cloud` (same run, for comparison) | 3 (`rename`, pad 16 KB) | 33% | 0% | 14.3 s | 1 `wrong_result` (import not updated), 1 `max_steps`, 3 schema errors (relative `file_path`, bad Grep `output_mode`). |

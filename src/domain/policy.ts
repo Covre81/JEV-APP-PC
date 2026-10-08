@@ -5,13 +5,27 @@ import type { ComplexityDistribution } from './complexity.js';
  *   cheap   — an OpenAI-compatible provider (Groq, OpenRouter, …), billed per token
  *   primary — Anthropic, the quota reserved for heavy lifting
  */
-export type Route = 'cheap' | 'primary';
+export type Route = 'cheap' | 'gemini' | 'primary';
+
+/**
+ * Which model serves a conversation. `trivial` and `standard` are both the
+ * cheap route (same OpenAI-compatible provider, different model); `primary`
+ * is Anthropic. Ordered: a conversation's tier only moves up.
+ */
+export type Tier = 'trivial' | 'standard' | 'gemini' | 'primary';
 
 export interface PolicyOptions {
-  /** Minimum probability that the task is cheap-eligible before leaving the primary quota. */
+  /** Minimum P(simple) for the trivial tier (the small cheap model). */
   readonly minCheapProbability: number;
-  /** Where level-2 ("standard") work goes. `primary` unless you have measured otherwise. */
+  /**
+   * Legacy, used only while the standard tier is off: `cheap` sends level-2
+   * mass to the trivial tier. Kept so an old .env keeps its behavior.
+   */
   readonly standardRoute: Route;
+  /** A standard-tier model is configured (CHEAP_MODEL_STANDARD is not `off`). */
+  readonly standardEnabled?: boolean;
+  /** Minimum P(simple) + P(standard) for the standard tier. */
+  readonly minStandardProbability?: number;
 }
 
 /**
@@ -22,10 +36,34 @@ export interface PolicyOptions {
  * depth. We send work to the cheap provider only when the probability mass of
  * cheap-eligible levels clears the bar; everything else stays on the primary.
  */
-export function selectRoute(d: ComplexityDistribution & { readonly risk?: number }, options: PolicyOptions): Route {
+export function selectTier(d: ComplexityDistribution & { readonly risk?: number }, options: PolicyOptions): Tier {
   if ((d.risk ?? 0) >= MAX_CHEAP_RISK) return 'primary';
-  const cheapMass = options.standardRoute === 'cheap' ? d.simple + d.standard : d.simple;
-  return cheapMass >= options.minCheapProbability ? 'cheap' : 'primary';
+  if (d.simple >= options.minCheapProbability) return 'trivial';
+  const lowMass = d.simple + d.standard;
+  if (options.standardEnabled) {
+    return lowMass >= (options.minStandardProbability ?? 1) ? 'standard' : 'primary';
+  }
+  return options.standardRoute === 'cheap' && lowMass >= options.minCheapProbability ? 'trivial' : 'primary';
+}
+
+/** The route of `selectTier`: both cheap tiers are the cheap route. */
+export function selectRoute(d: ComplexityDistribution & { readonly risk?: number }, options: PolicyOptions): Route {
+  return tierRoute(selectTier(d, options));
+}
+
+export const tierRoute = (tier: Tier): Route => (tier === 'primary' ? 'primary' : tier === 'gemini' ? 'gemini' : 'cheap');
+
+const TIER_RANK: Readonly<Record<Exclude<Tier, 'gemini'>, number>> = { trivial: 0, standard: 1, primary: 2 };
+
+/**
+ * Escalate-only, across tiers: trivial → standard → primary. Bouncing down
+ * would throw away the cache of the model the conversation moved up to.
+ */
+export function stickyTier(current: Tier, proposed: Tier): Tier {
+  if (current === 'gemini' && proposed === 'gemini') return 'primary';
+  if (current === 'gemini') return proposed;
+  if (proposed === 'gemini') return current;
+  return TIER_RANK[proposed] > TIER_RANK[current] ? proposed : current;
 }
 
 /**
@@ -44,4 +82,25 @@ const MAX_CHEAP_RISK = 0.5;
  */
 export function stickyRoute(current: Route, proposed: Route): Route {
   return current === 'primary' || proposed === 'primary' ? 'primary' : 'cheap';
+}
+
+export interface GeminiPolicyOptions {
+  readonly enabled: boolean;
+  readonly minTextOnly: number;
+  readonly pressureMinTextOnly: number;
+}
+
+export function geminiEligible(
+  d: ComplexityDistribution & { readonly risk?: number; readonly textOnly?: number },
+  proposedTier: Tier,
+  opts: GeminiPolicyOptions,
+  quotaLevel: 'none' | 'pressure' | 'critical'
+): boolean {
+  if (!opts.enabled) return false;
+  if (proposedTier !== 'primary') return false;
+  if ((d.risk ?? 0) >= MAX_CHEAP_RISK) return false;
+  if (d.textOnly === undefined) return false;
+  
+  const bar = quotaLevel !== 'none' ? Math.min(opts.minTextOnly, opts.pressureMinTextOnly) : opts.minTextOnly;
+  return d.textOnly >= bar;
 }

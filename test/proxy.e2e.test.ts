@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { request } from 'undici';
 import { HeuristicClassifier } from '../src/classifier/heuristic-classifier.js';
 import { loadConfig } from '../src/config.js';
-import type { Route } from '../src/domain/policy.js';
+import type { Tier } from '../src/domain/policy.js';
 import { AnthropicProvider } from '../src/providers/anthropic.js';
 import { OpenAICompatibleProvider } from '../src/providers/openai/provider.js';
 import { buildServer } from '../src/proxy/server.js';
@@ -107,13 +107,14 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
 
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       ANTHROPIC_UPSTREAM_URL: anthropic.url,
       CHEAP_BASE_URL: `${cheap.url}/openai/v1`,
       CHEAP_API_KEY: 'gsk_test',
       FAILOVER_ON_PRIMARY_RATE_LIMIT: 'true',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,
@@ -288,6 +289,10 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
           cacheWriteTokens: r.cache_write_tokens,
           latencyMs: r.latency_ms,
           fallbackTriggered: r.fallback_triggered === 1,
+          toolsOffered: r.tools_offered,
+          toolCalls: r.tool_calls,
+          inspectionMiss: r.inspection_miss === null ? null : r.inspection_miss === 1,
+          quotaUtilization: r.quota_utilization,
         }),
       );
       if (rows.length > 0) return rows;
@@ -311,6 +316,9 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.match(cheapRow.humanPromptHash ?? '', /^[0-9a-f]{64}$/);
     assert.ok(cheapRow.jevDecision && cheapRow.jevDecision.pSimple >= 0.8);
     assert.ok(cheapRow.latencyMs >= 150, 'latency covers the whole stream');
+    assert.equal(cheapRow.toolsOffered, 0);
+    assert.equal(cheapRow.toolCalls, 0);
+    assert.equal(cheapRow.inspectionMiss, false, 'no tools offered: answering in text is not a miss');
 
     const [primaryRow] = await logsFor('T-primary');
     assert.ok(primaryRow);
@@ -321,6 +329,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.equal(primaryRow.cacheWriteTokens, 0);
     assert.equal(primaryRow.tokensOut, 25);
     assert.equal(primaryRow.httpStatus, 200);
+    assert.equal(primaryRow.inspectionMiss, null, 'only cheap answers are judged');
   });
 
   it('flags the fallback when the cheap provider fails and Anthropic answers', async () => {
@@ -403,6 +412,7 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
     anthropic = await fakeServer(() => anthropicOk, anthropicLog);
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       ANTHROPIC_UPSTREAM_URL: anthropic.url,
       UPSTREAM_AUTH_MODE: 'inject',
       ANTHROPIC_API_KEY: 'sk-ant-proxy-test',
@@ -410,7 +420,7 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
       CHEAP_API_KEY: 'unused',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,
@@ -481,7 +491,9 @@ describe('inject mode: the proxy holds the Anthropic key and gates clients with 
   it('leaves /healthz open', async () => {
     const res = await request(`${proxyUrl}/healthz`);
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(await res.body.json(), { ok: true });
+    const body = (await res.body.json()) as Record<string, unknown>;
+    assert.equal(body['ok'], true);
+    assert.equal(body['cheap'], 'unknown', 'no health check wired');
   });
 });
 
@@ -495,12 +507,13 @@ describe('body limit', () => {
     upstream = await fakeServer(() => anthropicOk, seen);
     const config = loadConfig({
       CLASSIFIER: 'heuristic',
+      ROUTER_MIN_CHEAP_PROBABILITY: '0.8', // the heuristic tops out at 0.825
       CHEAP_API_KEY: 'unused',
       ANTHROPIC_UPSTREAM_URL: upstream.url,
       BODY_LIMIT_BYTES: '2000',
       LOG_LEVEL: 'fatal',
     });
-    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Route>(100, 60_000), {
+    const router = new Router(new HeuristicClassifier(), new TtlLruStore<Tier>(100, 60_000), {
       policy: { minCheapProbability: config.router.minCheapProbability, standardRoute: config.router.standardRoute },
       primaryClasses: config.router.primaryClasses,
       cheapContextTokens: 100_000,

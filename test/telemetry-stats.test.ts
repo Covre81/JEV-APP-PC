@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, it } from 'node:test';
 import { inTransaction, openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
-import type { NewRouterLog } from '../src/telemetry/schema.js';
+import { MIGRATIONS, recordQuota, type NewRouterLog } from '../src/telemetry/schema.js';
 import { pricingFromEnv } from '../src/telemetry/pricing.js';
 import { computeStats, parseSince, renderStats } from '../src/telemetry/stats.js';
 
@@ -27,35 +31,113 @@ describe('telemetry → stats', () => {
     sink.record(row({ finalProvider: 'openai', humanPromptHash: 'h1', tokensIn: 500, tokensOut: 50 }));
     sink.record(row({ finalProvider: 'openai', outcome: 'stream_error', tokensIn: 999, tokensOut: 9 }));
     sink.record(row({ routeReason: 'failover:cheap-unavailable', fallbackTriggered: true, tokensIn: 3000, tokensOut: 100, cacheReadTokens: 2000 }));
+    sink.record(row({ routeReason: 'failover:gemini-unavailable', fallbackTriggered: true, tokensIn: 3000, tokensOut: 100, cacheReadTokens: 2000 }));
     sink.record(row({ createdAt: new Date('2026-09-01T00:00:00Z'), tokensIn: 7, tokensOut: 7 }));
     sink.flush();
 
     const all = computeStats(db);
-    assert.equal(all.total, 5);
+    assert.equal(all.total, 6);
     assert.equal(all.byProvider.openai.requests, 3);
     assert.equal(all.byProvider.openai.ok, 2);
-    assert.equal(all.byProvider.anthropic.cacheReadTokens, 2000);
+    assert.equal(all.byProvider.anthropic.cacheReadTokens, 4000);
     assert.equal(all.fallbacks, 1);
+    assert.equal(all.geminiFallbacks, 1);
     assert.equal(all.cheapStreamErrors, 1);
     assert.equal(all.classified, 1);
     assert.equal(all.repeatedPrompts, 1);
     assert.equal(all.repeatedSends, 1);
     assert.equal(all.estimatedTokensSaved, 1750, 'only cheap requests served OK count');
 
-    const priced = computeStats(db, { pricing: pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '1', JEV_PRICE_OUTPUT_PER_MTOK: '10' }) });
+    const priced = computeStats(db, { pricing: pricingFromEnv({ JEV_PRICE_INPUT_PER_MTOK: '1', JEV_PRICE_OUTPUT_PER_MTOK: '10', CHEAP_PRICE_INPUT_PER_MTOK: '100', CHEAP_PRICE_OUTPUT_PER_MTOK: '1000' }) });
     assert.ok(Math.abs(priced.cost.jevUsd - (453 * 1 + 20 * 10) / 1_000_000) < 1e-12, 'JEV tokens come from jev_decision');
+    assert.ok(Math.abs(priced.cost.failedCheapUsd - (999 * 100 + 9 * 1000) / 1_000_000) < 1e-12, 'failed cheap ignores gemini failover');
     assert.match(renderStats(priced), /Classifier \(JEV\)/);
     assert.match(renderStats(all), /JEV priced at \$0/);
 
     const recent = computeStats(db, { since: new Date('2026-09-15T00:00:00Z') });
-    assert.equal(recent.total, 4);
+    assert.equal(recent.total, 5);
 
     const text = renderStats(all);
-    assert.match(text, /Requests\s+5/);
+    assert.match(text, /Requests\s+6/);
     assert.match(text, /Estimated Anthropic tokens saved\s+1,750/);
     assert.match(text, /NET \((PROFIT|LOSS)\)/);
     assert.match(text, /Cheap provider priced at \$0/);
     await sink.close();
+  });
+
+  it('counts cheap answers that ignored the tools they were offered (inspection miss)', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 0, inspectionMiss: true }));
+    sink.record(row({ finalProvider: 'openai', toolsOffered: 20, toolCalls: 2, inspectionMiss: false }));
+    sink.record(row({ finalProvider: 'anthropic', toolsOffered: 20, toolCalls: 0 }));
+    sink.flush();
+
+    const stats = computeStats(db);
+    assert.equal(stats.inspectionMisses, 1);
+    assert.match(renderStats(stats), /Cheap answers without tool use \(inspection miss\)\s+1/);
+    const stored = db.prepare('SELECT tools_offered, tool_calls, inspection_miss FROM router_logs ORDER BY id').all();
+    assert.deepEqual(
+      stored.map((r) => ({ ...r })),
+      [
+        { tools_offered: 20, tool_calls: 0, inspection_miss: 1 },
+        { tools_offered: 20, tool_calls: 2, inspection_miss: 0 },
+        { tools_offered: 20, tool_calls: 0, inspection_miss: null },
+      ],
+    );
+    await sink.close();
+  });
+
+  it('splits the cheap route by model (trivial 20B vs standard Gemma)', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', model: 'gpt-oss:20b-cloud' }));
+    sink.record(row({ finalProvider: 'openai', model: 'gemma4:31b-cloud' }));
+    sink.record(row({ finalProvider: 'openai', model: 'gemma4:31b-cloud', outcome: 'stream_error' }));
+    sink.record(row({ finalProvider: 'anthropic', model: 'claude-opus-5-5' }));
+    sink.flush();
+
+    const stats = computeStats(db);
+    assert.deepEqual(stats.cheapByModel, [
+      { model: 'gemma4:31b-cloud', requests: 2, ok: 1 },
+      { model: 'gpt-oss:20b-cloud', requests: 1, ok: 1 },
+    ]);
+    assert.match(renderStats(stats), /gemma4:31b-cloud\s+2\s+1/);
+    await sink.close();
+  });
+
+  it('reports the last quota reading and the turns the quota sent cheap', async () => {
+    const db = openTelemetryDb(':memory:');
+    const sink = new SqliteTelemetry(db, { flushIntervalMs: 60_000 });
+    sink.record(row({ finalProvider: 'openai', routeReason: 'quota:pressure' }));
+    sink.record(row({ finalProvider: 'openai', routeReason: 'quota:reclassified' }));
+    sink.record(row({ finalProvider: 'openai', routeReason: 'failover:primary-rate-limited' }));
+    sink.record(row({ routeReason: 'sticky' }));
+    sink.flush();
+    recordQuota(db, { utilization: 0.83, window: '5h', observedAt: new Date('2026-10-07T12:00:00Z') });
+
+    const stats = computeStats(db);
+    assert.equal(stats.quotaRouted, 3);
+    assert.deepEqual(stats.lastQuota && { u: stats.lastQuota.utilization, w: stats.lastQuota.window }, { u: 0.83, w: '5h' });
+    assert.match(renderStats(stats), /Sent cheap by quota pressure\s+3/);
+    assert.match(renderStats(stats), /Claude quota \(last seen\)\s+83% 5h/);
+    await sink.close();
+  });
+
+  it('migrates a database written by the previous build without losing rows', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'jev-migrate-'));
+    const file = join(dir, 'telemetry.db');
+    const old = new DatabaseSync(file);
+    for (const sql of MIGRATIONS.slice(0, 2)) old.exec(sql);
+    old.exec('PRAGMA user_version = 2');
+    old.exec(`INSERT INTO router_logs (final_provider, route_reason, outcome, latency_ms) VALUES ('openai', 'classified', 'ok', 5)`);
+    old.close();
+
+    const db = openTelemetryDb(file);
+    assert.equal((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version, MIGRATIONS.length);
+    assert.deepEqual({ ...db.prepare('SELECT tool_calls, inspection_miss FROM router_logs').get() }, { tool_calls: null, inspection_miss: null });
+    assert.equal(computeStats(db).inspectionMisses, 0);
+    db.close();
   });
 
   it('keeps rows queued when a write fails and retries on the next flush', async () => {

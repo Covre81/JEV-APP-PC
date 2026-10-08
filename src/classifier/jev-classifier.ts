@@ -1,7 +1,7 @@
-import { request } from 'undici';
 import { z } from 'zod';
 import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
 import type { Classification, ClassificationInput, ComplexityClassifier } from './classifier.js';
+import { JevClient } from '../context/jev-client.js';
 
 /**
  * Adapter for TypeSafe JEV (`POST /v1/systemone`).
@@ -33,6 +33,13 @@ export const RISK_QUESTIONS = {
     type: 'noul',
     instructions: 'The request deletes data or files, runs a database migration, or acts on a production system.',
   },
+  // The cheap model answered "is everything ok here?" without checking anything and
+  // invented a diff summary: questions about the repository's state need its tools.
+  requires_inspection: {
+    type: 'noul',
+    instructions:
+      "The request asks for a verdict or a report about the project's current state (whether things are ok, what changed, what is wrong, where things stand) that can only be given after investigating several files, diffs, git history or logs, and the request itself does not contain those facts (e.g. 'is everything ok here?', 'summarize what changed in the statusline'). A request to make a specific edit, run a named command, or explain code or text included in the request is NOT this.",
+  },
 } as const;
 
 /** Risk answers are a safety gate: required, so a missing one fails the call toward primary. */
@@ -63,6 +70,7 @@ export interface JevClassifierOptions {
   readonly apiUrl: string;
   readonly apiKey: string;
   readonly model: string;
+  readonly geminiEnabled?: boolean;
 }
 
 export class JevClassifier implements ComplexityClassifier {
@@ -71,23 +79,12 @@ export class JevClassifier implements ComplexityClassifier {
   constructor(private readonly options: JevClassifierOptions) {}
 
   async classify(input: ClassificationInput, signal: AbortSignal): Promise<Classification> {
-    const res = await request(this.options.apiUrl, {
-      method: 'POST',
-      signal,
-      headers: {
-        authorization: `Bearer ${this.options.apiKey}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(jevRequestBody(this.options.model, input)),
-    });
-
-    const payload: unknown = await res.body.json();
-    if (res.statusCode !== 200) {
-      throw new Error(`JEV HTTP ${res.statusCode}: ${JSON.stringify(payload).slice(0, 300)}`);
-    }
+    const client = new JevClient({ apiUrl: this.options.apiUrl, apiKey: this.options.apiKey });
+    const payload = await client.postSystemOne(jevRequestBody(this.options.model, input, this.options.geminiEnabled), signal);
 
     const usage = JevUsage.safeParse(payload);
     const model = JevModel.safeParse(payload);
+    const textOnly = parseJevTextOnly(payload);
     return {
       ...parseJevAnswer(payload),
       risk: parseJevRisk(payload),
@@ -95,12 +92,20 @@ export class JevClassifier implements ComplexityClassifier {
         ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
         : {}),
       ...(model.success ? { model: model.data.model } : {}),
+      ...(textOnly !== undefined ? { textOnly } : {}),
     };
   }
 }
 
 /** Request body for one ordinal complexity question. */
-export function jevRequestBody(model: string, input: ClassificationInput): object {
+export function jevRequestBody(model: string, input: ClassificationInput, geminiEnabled?: boolean): object {
+  const extraQuestions = geminiEnabled ? {
+    text_answer_suffices: {
+      type: 'noul',
+      instructions: "The request can be fully and correctly answered with a written reply alone — an explanation, a concept, a plan, a design or architecture discussion, a recommendation, or a review of code or text that is already included in the conversation — and does NOT require reading files that are not in the conversation, searching the repository, running commands or tests, browsing, or creating or editing any file."
+    }
+  } : {};
+
   return {
     model,
     state: buildState(input),
@@ -111,6 +116,7 @@ export function jevRequestBody(model: string, input: ClassificationInput): objec
         criteria: COMPLEXITY_CRITERIA,
       },
       ...RISK_QUESTIONS,
+      ...extraQuestions,
     },
   };
 }
@@ -125,6 +131,22 @@ export function parseJevAnswer(payload: unknown): ComplexityDistribution {
 export function parseJevRisk(payload: unknown): number {
   const answers = JevRisk.parse(payload).answers as Record<string, { noul: number }>;
   return Math.max(...Object.keys(RISK_QUESTIONS).map((k) => answers[k]!.noul));
+}
+
+export function parseJevTextOnly(payload: unknown): number | undefined {
+  try {
+    const parsed = z.looseObject({
+      answers: z.looseObject({
+        text_answer_suffices: z.looseObject({ noul: z.number().min(0).max(1) }).optional()
+      })
+    }).safeParse(payload);
+    if (parsed.success && parsed.data.answers.text_answer_suffices) {
+      return parsed.data.answers.text_answer_suffices.noul;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

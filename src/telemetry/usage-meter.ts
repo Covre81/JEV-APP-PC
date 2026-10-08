@@ -10,6 +10,8 @@ export interface Usage {
   readonly cacheReadTokens: number;
   /** Portion of tokensIn written to the prompt cache (billed at the write premium). */
   readonly cacheWriteTokens: number;
+  readonly cacheWrite5mTokens?: number;
+  readonly cacheWrite1hTokens?: number;
 }
 
 export interface MeteredBody {
@@ -19,6 +21,8 @@ export interface MeteredBody {
   usage(): Usage | undefined;
   /** True if the stream carried an Anthropic `error` event. */
   sawErrorEvent(): boolean;
+  /** `tool_use` blocks in the response; final once the body has ended. */
+  toolCalls(): number;
   /** Resolves once metering is over (body fully parsed, or abandoned). Never rejects. */
   readonly settled: Promise<void>;
 }
@@ -31,6 +35,10 @@ interface UsageFields {
   output_tokens?: unknown;
   cache_creation_input_tokens?: unknown;
   cache_read_input_tokens?: unknown;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: unknown;
+    ephemeral_1h_input_tokens?: unknown;
+  };
 }
 
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
@@ -47,8 +55,12 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
   let output: number | undefined;
   let cacheRead = 0;
   let cacheWrite = 0;
+  let cache5m: number | undefined;
+  let cache1h: number | undefined;
   let errorEvent = false;
   let seen = false;
+  let toolCalls = 0;
+  const onToolUse = () => void toolCalls++;
 
   const absorb = (u: UsageFields | undefined) => {
     if (!u || typeof u !== 'object') return;
@@ -58,12 +70,16 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
     output = num(u.output_tokens) ?? output;
     cacheRead = num(u.cache_read_input_tokens) ?? cacheRead;
     cacheWrite = num(u.cache_creation_input_tokens) ?? cacheWrite;
+    cache5m = num(u.cache_creation?.ephemeral_5m_input_tokens) ?? cache5m;
+    cache1h = num(u.cache_creation?.ephemeral_1h_input_tokens) ?? cache1h;
   };
 
   let settle!: () => void;
   const settled = new Promise<void>((resolve) => (settle = resolve));
 
-  const sink = contentType.includes('text/event-stream') ? sseSink(absorb, () => (errorEvent = true)) : jsonSink(absorb);
+  const sink = contentType.includes('text/event-stream')
+    ? sseSink(absorb, () => (errorEvent = true), onToolUse)
+    : jsonSink(absorb, onToolUse);
   const decoder = decompressor(contentEncoding);
   let broken = false;
   const finish = () => {
@@ -116,16 +132,20 @@ export function meterAnthropicBody(body: Readable, contentType: string, contentE
 
   return {
     body: tap,
-    usage: () =>
-      seen && (input !== undefined || output !== undefined)
-        ? {
-            tokensIn: (input ?? 0) + cacheRead + cacheWrite,
-            tokensOut: output ?? 0,
-            cacheReadTokens: cacheRead,
-            cacheWriteTokens: cacheWrite,
-          }
-        : undefined,
+    usage: () => {
+      if (!seen || (input === undefined && output === undefined)) return undefined;
+      const res: Usage = {
+        tokensIn: (input ?? 0) + cacheRead + cacheWrite,
+        tokensOut: output ?? 0,
+        cacheReadTokens: cacheRead,
+        cacheWriteTokens: cacheWrite,
+      };
+      if (cache5m !== undefined) (res as any).cacheWrite5mTokens = cache5m;
+      if (cache1h !== undefined) (res as any).cacheWrite1hTokens = cache1h;
+      return res;
+    },
     sawErrorEvent: () => errorEvent,
+    toolCalls: () => toolCalls,
     settled,
   };
 }
@@ -149,15 +169,20 @@ function decompressor(encoding: string | undefined): Gunzip | Transform | undefi
   }
 }
 
-/** Line-oriented SSE scan: only `data:` lines that can carry usage or an error are JSON-parsed. */
-function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void): Sink {
+/** Line-oriented SSE scan: only `data:` lines that can carry usage, an error or a tool call are JSON-parsed. */
+function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => void, onToolUse: () => void): Sink {
   const text = new StringDecoder('utf8');
   let pending = '';
   const line = (raw: string) => {
     if (!raw.startsWith('data:')) return;
     const data = raw.slice(5).trim();
-    if (!data.includes('"usage"') && !data.includes('"error"')) return;
-    let event: { type?: unknown; usage?: UsageFields; message?: { usage?: UsageFields } };
+    if (!data.includes('"usage"') && !data.includes('"error"') && !data.includes('"tool_use"')) return;
+    let event: {
+      type?: unknown;
+      usage?: UsageFields;
+      message?: { usage?: UsageFields };
+      content_block?: { type?: unknown };
+    };
     try {
       event = JSON.parse(data);
     } catch {
@@ -166,6 +191,7 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
     if (event.type === 'message_start') absorb(event.message?.usage);
     else if (event.type === 'message_delta') absorb(event.usage);
     else if (event.type === 'error') onError();
+    else if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') onToolUse();
   };
   const scan = (chunk: string) => {
     pending += chunk;
@@ -185,7 +211,7 @@ function sseSink(absorb: (u: UsageFields | undefined) => void, onError: () => vo
   };
 }
 
-function jsonSink(absorb: (u: UsageFields | undefined) => void): Sink {
+function jsonSink(absorb: (u: UsageFields | undefined) => void, onToolUse: () => void): Sink {
   const parts: Buffer[] = [];
   let size = 0;
   return {
@@ -195,8 +221,11 @@ function jsonSink(absorb: (u: UsageFields | undefined) => void): Sink {
       parts.push(chunk);
     },
     end: () => {
-      const parsed = JSON.parse(Buffer.concat(parts).toString('utf8')) as { usage?: UsageFields };
+      const parsed = JSON.parse(Buffer.concat(parts).toString('utf8')) as { usage?: UsageFields; content?: unknown };
       absorb(parsed.usage);
+      if (Array.isArray(parsed.content)) {
+        for (const block of parsed.content) if ((block as { type?: unknown } | null)?.type === 'tool_use') onToolUse();
+      }
     },
   };
 }

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { fork } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { loadConfig } from './config.js';
+import { controlPort, loadConfig } from './config.js';
 import { loadEnv } from './env.js';
 import { defaultTelemetryDbPath } from './paths.js';
 
@@ -9,8 +11,10 @@ const USAGE = `Usage: jev-router [command] [options]
 
 Commands:
   serve            Start the gateway (default)
-  stats            Print routing and token-savings statistics from the telemetry database
+  reload           Swap in a freshly built worker without dropping open sessions
+  stats           Print routing and token-savings statistics from the telemetry database
   statusline       One line for Claude Code's statusLine: router health and this session's last route
+  context          Evaluate and inject ai-memory / graphify context for prompts
   help             Show this message
 
 Options:
@@ -30,6 +34,10 @@ async function main(argv: string[]): Promise<number> {
       db: { type: 'string' },
       since: { type: 'string' },
       json: { type: 'boolean', default: false },
+      'by-class': { type: 'boolean', default: false },
+      'cache-misses': { type: 'boolean', default: false },
+      'min-write': { type: 'string' },
+      daily: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -39,13 +47,42 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  loadEnv(values.env);
+  // Snapshot before the env file lands in process.env: a reloaded worker must
+  // read the file afresh, and loadEnvFile never overwrites inherited values.
+  const shellEnv = { ...process.env };
+  const envFile = loadEnv(values.env);
 
   switch (command) {
     case 'serve': {
-      const { serve } = await import('./serve.js');
-      await serve(loadConfig());
+      const config = loadConfig();
+      const { serve, supervise } = await import('./serve.js');
+      if (process.env['JEV_ROUTER_WORKER'] === '1') {
+        await serve(config, { worker: true });
+      } else if (config.supervisor.enabled) {
+        await supervise(config, () =>
+          fork(fileURLToPath(import.meta.url), ['serve', ...(envFile ? ['--env', envFile] : [])], {
+            env: { ...shellEnv, JEV_ROUTER_WORKER: '1' },
+            // `tsx watch` / `node --test` flags would make the worker a watcher or a test run.
+            execArgv: process.execArgv.filter((a) => !/^--(watch|test)/.test(a)),
+          }),
+        );
+      } else {
+        await serve(config);
+      }
       return -1; // keep running
+    }
+    case 'reload': {
+      // Only the control port is needed: works without provider keys.
+      const url = `http://127.0.0.1:${controlPort()}/reload`;
+      let res: Response;
+      try {
+        res = await fetch(url, { method: 'POST', signal: AbortSignal.timeout(60_000) });
+      } catch {
+        console.error(`No supervisor at ${url}: is the router running with SUPERVISOR_ENABLED=true?`);
+        return 1;
+      }
+      console.log(await res.text());
+      return res.ok ? 0 : 1;
     }
     case 'stats': {
       // stats must work without provider keys: read only what it needs.
@@ -54,7 +91,7 @@ async function main(argv: string[]): Promise<number> {
         console.error(`No telemetry database at ${dbPath}. Start the gateway with \`jev-router serve\` first.`);
         return 1;
       }
-      const [{ openTelemetryDb }, { computeStats, parseSince, renderStats }, { pricingFromEnv }] = await Promise.all([
+      const [{ openTelemetryDb }, statsModule, { pricingFromEnv }] = await Promise.all([
         import('./telemetry/db.js'),
         import('./telemetry/stats.js'),
         import('./telemetry/pricing.js'),
@@ -62,20 +99,48 @@ async function main(argv: string[]): Promise<number> {
       // Writable on purpose: applies pending migrations if the gateway has not run since an upgrade.
       const db = openTelemetryDb(dbPath);
       try {
-        const stats = computeStats(db, {
-          ...(values.since ? { since: parseSince(values.since) } : {}),
-          pricing: pricingFromEnv(),
-        });
-        console.log(values.json ? JSON.stringify(stats, null, 2) : renderStats(stats));
+        const pricing = pricingFromEnv();
+        const opts = values.since ? { since: statsModule.parseSince(values.since) } : {};
+        if (values['by-class']) {
+          const stats = statsModule.computeStatsByClass(db, pricing, opts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderStatsByClass(stats));
+        } else if (values['cache-misses']) {
+          const missOpts: any = { ...opts };
+          if (values['min-write'] !== undefined) {
+            if (!/^[1-9]\d*$/.test(values['min-write']!)) {
+              console.error('--min-write must be a positive integer.');
+              return 1;
+            }
+            missOpts.minWrite = parseInt(values['min-write']!, 10);
+          }
+          const stats = statsModule.computeCacheMisses(db, pricing, missOpts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderCacheMisses(stats));
+        } else if (values.daily) {
+          const stats = statsModule.computeDailyStats(db, pricing, opts);
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderDailyStats(stats));
+        } else {
+          const stats = statsModule.computeStats(db, { ...opts, pricing });
+          console.log(values.json ? JSON.stringify(stats, null, 2) : statsModule.renderStats(stats));
+        }
       } finally {
         db.close();
       }
       return 0;
     }
+    case 'context': {
+      const { runContextHook } = await import('./context/command.js');
+      const code = await runContextHook(values.env);
+      return code;
+    }
     case 'statusline': {
-      const { readSessionId, statusLine } = await import('./statusline.js');
+      const [{ readSessionId, statusLine }, { readBuildInfo }] = await Promise.all([
+        import('./statusline.js'),
+        import('./build-info.js'),
+      ]);
       const sessionId = await readSessionId();
+      const localBuild = readBuildInfo();
       const line = await statusLine({
+        ...(localBuild ? { localBuild } : {}),
         dbPath: values.db ?? process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath(),
         healthUrl: `http://${process.env['HOST'] || '127.0.0.1'}:${process.env['PORT'] || '8787'}/healthz`,
         ...(sessionId ? { sessionId } : {}),
