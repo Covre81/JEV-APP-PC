@@ -13,6 +13,8 @@ const HOP_BY_HOP = new Set([
   'upgrade',
   'host',
   'content-length',
+  // undici rejects 'expect' and can wedge the pool; Node answers 100-continue itself.
+  'expect',
 ]);
 
 export type HeaderMap = Record<string, string | string[]>;
