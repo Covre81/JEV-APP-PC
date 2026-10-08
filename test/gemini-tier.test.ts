@@ -31,7 +31,7 @@ describe('Gemini tier unit tests', () => {
     });
 
     it('GEMINI_TIER=on gives correct defaults', () => {
-      const c = loadConfig({ CHEAP_API_KEY: 'k', CLASSIFIER: 'heuristic', GEMINI_TIER: 'on', JEV_ROUTER_HOME: '\\jev-home' });
+      const c = loadConfig({ CHEAP_API_KEY: 'k', CLASSIFIER: 'heuristic', GEMINI_TIER: 'on', JEV_ROUTER_HOME: '/jev-home' });
       assert.ok(c.gemini);
       assert.equal(c.gemini.model, 'gemini-3.1-pro-high');
       assert.equal(c.gemini.timeoutMs, 60000);
