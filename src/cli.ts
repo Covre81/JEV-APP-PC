@@ -150,6 +150,8 @@ async function main(argv: string[]): Promise<number> {
         dbPath: values.db ?? process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath(),
         healthUrl: `http://${process.env['HOST'] || '127.0.0.1'}:${process.env['PORT'] || '8787'}/healthz`,
         ...(sessionId ? { sessionId } : {}),
+        // Opt-in: Claude Code's own status line already shows the plan's 5h/7d usage.
+        ...(process.env['STATUSLINE_QUOTA'] === '1' ? { showQuota: true } : {}),
       });
       // Exit once written: a stdin that never closed must not keep the status line hanging.
       process.stdout.write(`${line}\n`, () => process.exit(0));
