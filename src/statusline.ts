@@ -19,6 +19,11 @@ export interface StatusLineOptions {
   readonly sessionId?: string;
   /** dist/build-info.json of this checkout, compared with what /healthz says is running. */
   readonly localBuild?: BuildInfo;
+  /**
+   * Echo the router's last Claude quota reading (`cota 42% 5h`). Off by default:
+   * Claude Code's own status line JSON already carries the plan's 5h/7d usage.
+   */
+  readonly showQuota?: boolean;
 }
 
 /** The part of /healthz the status line reads; older routers answer only `{ok:true}`. */
@@ -33,7 +38,7 @@ interface Health {
  * it must answer fast and never fail, so every error degrades to less
  * information instead of an exception.
  */
-export async function statusLine({ dbPath, healthUrl, sessionId, localBuild }: StatusLineOptions): Promise<string> {
+export async function statusLine({ dbPath, healthUrl, sessionId, localBuild, showQuota = false }: StatusLineOptions): Promise<string> {
   const health = await probeHealth(healthUrl);
   const healthy = health !== undefined;
   let data: StatusLineData = {
@@ -51,7 +56,7 @@ export async function statusLine({ dbPath, healthUrl, sessionId, localBuild }: S
         const context = sessionContext(db, sessionId);
         let quota: ReturnType<typeof latestQuota>;
         try {
-          quota = latestQuota(db);
+          if (showQuota) quota = latestQuota(db);
         } catch {
           // Database not migrated yet (old router still running): no quota to show.
         }

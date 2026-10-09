@@ -117,6 +117,15 @@ describe('statusline', () => {
     }
   });
 
+  it('leaves the quota echo out unless asked for (STATUSLINE_QUOTA=1)', async () => {
+    const quotaDb = join(mkdtempSync(join(tmpdir(), 'jev-statusline-quota-')), 'telemetry.db');
+    const db = openTelemetryDb(quotaDb);
+    db.prepare('INSERT INTO quota_observations (created_at, utilization, window, status) VALUES (?, ?, ?, ?)').run(Date.now(), 0.42, '5h', 'allowed');
+    db.close();
+    assert.equal(await statusLine({ dbPath: quotaDb, healthUrl }), 'jev-router ✓');
+    assert.equal(await statusLine({ dbPath: quotaDb, healthUrl, showQuota: true }), 'jev-router ✓ · cota 42% 5h');
+  });
+
   it('shows the binding Claude quota window, with a warning from 80% on', () => {
     assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.42, window: '5h' } }), 'jev-router ✓ · cota 42% 5h');
     assert.equal(renderStatusLine({ healthy: true, quota: { utilization: 0.82, window: '5h' } }), 'jev-router ✓ · ⚠ cota 82% 5h');

@@ -418,9 +418,11 @@ It prints `jev-router ✓ · last: cheap (JEV 0.93) · today 12/40 cheap`, or
 `⚠ build velho` means `dist/build-info.json` is newer than the build that
 answers `/healthz` (built but not reloaded: run `jev-router reload`);
 `cheap ✗` means the health check sees the cheap provider down.
-`cota 82% 5h` is the binding Claude quota window as the router last saw it
+With `STATUSLINE_QUOTA=1` in the env file it also appends `cota 82% 5h`,
+the binding Claude quota window as the router last saw it
 (`⚠` from 80%, where the cheap bars drop); readings older than 6 h are not
-shown. The
+shown. It is off by default: Claude Code's own status line JSON already
+carries the plan's 5h/7d usage. The
 reason in parentheses is JEV's P(simple), or the route reason when JEV wasn't
 asked (`sticky`, `auxiliary`, …). `today 12/40 cheap` counts today's routed
 turns, not requests: main-agent human turns plus every turn JEV scored
