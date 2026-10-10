@@ -14,8 +14,11 @@ export type Classification = ComplexityDistribution & {
   readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
   /** P(the turn is security-sensitive or destructive); a high value vetoes the cheap route. */
   readonly risk?: number;
+  /** Each risk Noul by question id; `risk` is their max. */
+  readonly riskScores?: Readonly<Record<string, number>>;
   /** Versioned model that answered (an alias like `jev-latest` resolves to it). */
   readonly model?: string;
+  /** P(a written reply alone answers the turn); asked only when the Gemini tier is on. */
   readonly textOnly?: number;
 };
 

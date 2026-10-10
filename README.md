@@ -446,7 +446,7 @@ Every `/v1/messages` exchange is written to `~/.jev-router/telemetry.db`
 |---|---|
 | `session_id` | Conversation key: `<x-claude-code-session-id>:<agent>`, or a hash of the first message |
 | `human_prompt_hash` | sha256 of the human-typed text; null on tool-result turns. Equal hashes = repeated prompt |
-| `jev_decision` | JSON `{simple, standard, structural, pSimple, pComplex, classifierMs}`; `pComplex` is level 3. Null when JEV was not asked (sticky turns, auxiliary requests) |
+| `jev_decision` | JSON `{simple, standard, structural, pSimple, pComplex, classifierMs, tokensIn, tokensOut, risk, riskScores, textOnly, model}`; `pComplex` is level 3, `tokensIn/Out` are the classifier's own usage, `riskScores` holds each risk Noul (`risk` is their max), `textOnly` is null unless the Gemini tier is on. Null when JEV was not asked (sticky turns, auxiliary requests) |
 | `final_provider` | `anthropic` or `openai` (the cheap OpenAI-compatible provider) |
 | `tokens_in` / `tokens_out` | From the response `usage`; `tokens_in` includes cache reads and writes |
 | `cache_read_tokens` | Part of `tokens_in` served from the Anthropic prompt cache |
@@ -494,8 +494,9 @@ Known limits:
   close to what Anthropic would have counted;
 - rows logged before the `cache_write_tokens` column existed are priced as if
   they had no cache writes;
-- requests whose response carried no `usage` are counted and reported, but
-  priced at $0.
+- served (`ok`) requests whose response carried no `usage` are counted and
+  reported, but priced at $0; failed requests never carry usage and are not
+  counted.
 
 
 ### Diagnostics (R0)

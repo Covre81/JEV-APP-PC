@@ -88,6 +88,8 @@ describe('computeNetCost', () => {
         row({ sessionId: 'a', finalProvider: 'openai', tokensIn: M }),
         row({ sessionId: 'b', tokensIn: M, cacheWriteTokens: M }),
         row({ sessionId: 'b', tokensIn: null, tokensOut: null }),
+        // A 502 never has usage: not a gap in the numbers.
+        row({ sessionId: 'c', tokensIn: null, tokensOut: null, outcome: 'proxy_error' }),
       ],
       pricing,
     );

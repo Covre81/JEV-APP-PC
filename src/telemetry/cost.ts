@@ -39,7 +39,7 @@ export interface NetCost {
   readonly netUsd: number;
   /** cheap → Anthropic transitions that paid the cache-miss penalty. */
   readonly transitions: number;
-  /** Rows priced at $0 because the response carried no usage. */
+  /** Served rows (outcome ok) priced at $0 because the response carried no usage; failures never have any. */
   readonly rowsWithoutUsage: number;
   /** Anthropic models missing from the price table (priced at $0, so the result is optimistic). */
   readonly unpricedModels: readonly string[];
@@ -98,7 +98,7 @@ export function computeNetCost(rows: readonly CostRow[], pricing: Pricing): NetC
 
   for (const row of rows) {
     const prev = row.sessionId ? last.get(row.sessionId) : undefined;
-    if (row.tokensIn === null) rowsWithoutUsage++;
+    if (row.tokensIn === null && row.outcome === 'ok') rowsWithoutUsage++;
     jevUsd += ((row.jevTokensIn ?? 0) * pricing.jev.input + (row.jevTokensOut ?? 0) * pricing.jev.output) / PER_MTOK;
 
     if (row.finalProvider === 'openai' || row.finalProvider === 'gemini') {
