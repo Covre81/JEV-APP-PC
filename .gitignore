@@ -10,3 +10,4 @@ scripts/eval-jev.local.json
 .env.*
 !.env.example
 .claude/
+docs/superpowers/
