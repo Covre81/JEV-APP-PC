@@ -43,10 +43,14 @@ export const RISK_QUESTIONS = {
 } as const satisfies Record<RiskQuestion, unknown>;
 
 /** Risk answers are a safety gate: required, so a missing one fails the call toward primary. */
+const RiskNoul = z.looseObject({ noul: z.number().min(0).max(1) });
+// Spelled out (not derived from RISK_QUESTIONS) so the parsed answers stay typed; `satisfies` keeps the two in sync.
 const JevRisk = z.looseObject({
-  answers: z.looseObject(
-    Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, z.looseObject({ noul: z.number().min(0).max(1) })])),
-  ),
+  answers: z.looseObject({
+    security_sensitive: RiskNoul,
+    destructive_or_production: RiskNoul,
+    requires_inspection: RiskNoul,
+  } satisfies Record<RiskQuestion, typeof RiskNoul>),
 });
 
 /** The part of the JEV response the adapter depends on. Unknown fields are tolerated. */
@@ -131,8 +135,12 @@ export function parseJevAnswer(payload: unknown): ComplexityDistribution {
 
 /** Each risk Noul by question id; throws when any is missing. */
 export function parseJevRiskScores(payload: unknown): RiskScores {
-  const answers = JevRisk.parse(payload).answers as Record<RiskQuestion, { noul: number }>;
-  return Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, answers[k as RiskQuestion].noul])) as RiskScores;
+  const a = JevRisk.parse(payload).answers;
+  return {
+    security_sensitive: a.security_sensitive.noul,
+    destructive_or_production: a.destructive_or_production.noul,
+    requires_inspection: a.requires_inspection.noul,
+  };
 }
 
 const maxRisk = (scores: RiskScores): number => Math.max(...Object.values(scores));

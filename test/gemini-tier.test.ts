@@ -86,6 +86,8 @@ describe('Gemini tier unit tests', () => {
     it('parseJevRiskScores keeps each risk Noul by question', () => {
       const payload = { answers: { security_sensitive: { noul: 0.1 }, destructive_or_production: { noul: 0.2 }, requires_inspection: { noul: 0.4 } } };
       assert.deepEqual(parseJevRiskScores(payload), { security_sensitive: 0.1, destructive_or_production: 0.2, requires_inspection: 0.4 });
+      // A missing risk answer must fail the call (toward primary), never read as zero risk.
+      assert.throws(() => parseJevRiskScores({ answers: { security_sensitive: { noul: 0.1 }, destructive_or_production: { noul: 0.2 } } }));
     });
   });
 
