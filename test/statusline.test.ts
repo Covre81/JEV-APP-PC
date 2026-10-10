@@ -52,9 +52,17 @@ describe('statusline', () => {
     sink.record(row({ sessionId: 'nohdr:main', humanPromptHash: 'h', jevDecision: jev(0.4) })); // no hint headers: request class is null
     sink.record(row({ sessionId: 'aux:main', routeReason: 'passthrough:request-class', requestClass: 'auxiliary', humanPromptHash: 'h' }));
     sink.record(row({ ...turn, sessionId: 'fail:main', finalProvider: 'openai', outcome: 'stream_error', jevDecision: jev(0.95) }));
+    // No human text, no JEV decision: outside today's share.
+    sink.record(row({ sessionId: 'swap:main', finalProvider: 'openai', routeReason: 'sticky', model: 'gpt-oss:20b-cloud', requestedModel: 'claude-opus-5-5' }));
+    sink.record(row({ sessionId: 'same:main', routeReason: 'sticky', model: 'claude-opus-5-5', requestedModel: 'claude-opus-5-5' }));
     await sink.close();
   });
   after(() => new Promise<void>((r) => health.close(() => r())));
+
+  it('names the served model only when it differs from the requested one', async () => {
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'swap' }), 'jev-router ✓ · last: cheap gpt-oss:20b-cloud (sticky) · today 3/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'same' }), 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap');
+  });
 
   it("shows the session's last route, across its agents, and today's cheap share of routed turns", async () => {
     assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap');
@@ -135,6 +143,13 @@ describe('statusline', () => {
     assert.equal(
       renderStatusLine({ healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error', pSimple: 0.9 } }),
       'jev-router ✓ · last: cheap (JEV 0.90) stream_error',
+    );
+  });
+
+  it('names the served model when the router swapped it', () => {
+    assert.equal(
+      renderStatusLine({ healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'ok', pSimple: 0.95, model: 'gpt-oss:20b-cloud' } }),
+      'jev-router ✓ · last: cheap gpt-oss:20b-cloud (JEV 0.95)',
     );
   });
 
