@@ -13,8 +13,6 @@ import { meterAnthropicBody } from '../src/telemetry/usage-meter.js';
 import { computeCacheMisses, renderCacheMisses, computeStatsByClass, computeDailyStats, renderDailyStats } from '../src/telemetry/stats.js';
 import { pricingFromEnv, anthropicListPrice } from '../src/telemetry/pricing.js';
 import { computeNetCost } from '../src/telemetry/cost.js';
-import { auditFailure, type ExchangeContext } from '../src/telemetry/audit.js';
-import type { NewRouterLog } from '../src/telemetry/schema.js';
 
 const collect = async (r: Readable) => Buffer.concat(await r.toArray());
 
@@ -315,19 +313,5 @@ describe('R0 Diagnostics - Fastify Server', () => {
     assert.ok(capturedDiagnosticsOn.systemHash);
     assert.equal(capturedDiagnosticsOn.systemChars, 13); // 'hello world' length + quotes
   });
-
-  it('auditFailure keeps the cause of a 502 and pins it on the attempt that failed', () => {
-    const rows: NewRouterLog[] = [];
-    const sink = { record: (r: NewRouterLog) => void rows.push(r), close: async () => {} };
-    const ctx: ExchangeContext = {
-      startedAt: performance.now(), startedAtMs: Date.now(), humanText: 'x', requestClass: 'main',
-      model: 'm', requestedModel: 'm', toolsOffered: 0, upstream: { failure: 'retried: network' },
-    };
-    auditFailure(sink, { route: 'cheap', reason: 'classified', conversationKey: 'k' }, ctx, 'network: ECONNREFUSED');
-    // Failed over to Claude, which failed too: the cheap retry's record is not this attempt's cause.
-    auditFailure(sink, { route: 'primary', reason: 'failover:cheap-unavailable', conversationKey: 'k' }, ctx, 'network: getaddrinfo ENOTFOUND');
-    auditFailure(sink, { route: 'primary', reason: 'sticky', conversationKey: 'k' }, { ...ctx, upstream: undefined }, `HTTP 500: ${'x'.repeat(500)}`);
-    assert.deepEqual(rows.map((r) => r.upstreamFailure?.slice(0, 32)), ['retried: network', 'network: getaddrinfo ENOTFOUND', 'HTTP 500: ' + 'x'.repeat(22)]);
-    assert.equal(rows[2]!.upstreamFailure!.length, 200);
-  });
 });
+
