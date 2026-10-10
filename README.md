@@ -314,9 +314,12 @@ cut them all. `jev-router serve` now runs as a **supervisor**: it owns
 and pipes every request to it (unbuffered, so SSE streams flow as written).
 
 ```bash
-npm run build
-jev-router reload          # or: node dist/cli.js reload --env .env
+npm run build              # runs `reload` itself via the `postbuild` hook
+jev-router reload          # manual, e.g. after editing .env: node dist/cli.js reload --env .env
 ```
+
+`postbuild` ignores a missing supervisor (router not running, or `npm install`
+triggering `prepare`), so a build never fails because of it.
 
 `reload` asks the supervisor (loopback-only control port, `CONTROL_PORT`,
 default `PORT + 1`) to start a fresh worker from the new `dist/`. Once it
@@ -435,6 +438,12 @@ above 200k carried 92% of main-session tokens. Pass `--env` explicitly: the
 status line runs in each project's directory, and that project's own `.env`
 could set another `PORT`. Adjust the paths to your checkout (or use
 `jev-router statusline` after `npm link`).
+
+A status line that wraps this one and colours it can pass `--json` instead of
+parsing the markers: it prints `{"text":"jev-router ✓ · …","level":"ok"}`,
+where `level` is `critical` when the router is offline, `warn` when the line
+flags anything (`⚠`, `cheap ✗`, a last turn that did not end ok), and `ok`
+otherwise.
 
 ## Telemetry and cost audit
 

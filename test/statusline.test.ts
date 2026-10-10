@@ -1,16 +1,17 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, before, describe, it } from 'node:test';
 import { readSessionId, statusLine } from '../src/statusline.js';
 import { openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
 import type { NewRouterLog } from '../src/telemetry/schema.js';
-import { renderStatusLine } from '../src/telemetry/statusline.js';
+import { renderStatusLine, statusLineReport, type StatusLineData } from '../src/telemetry/statusline.js';
 
 const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
   createdAt: new Date(),
@@ -156,6 +157,41 @@ describe('statusline', () => {
   it('warns from exactly 200k context on', () => {
     assert.equal(renderStatusLine({ healthy: true, context: 199_999 }), 'jev-router ✓ · ctx 200k');
     assert.equal(renderStatusLine({ healthy: true, context: 200_000 }), 'jev-router ✓ · ⚠ ctx 200k → /compact or /clear');
+  });
+
+  it('reports a level from the data, so a caller never parses ✗ or ⚠ out of the text', () => {
+    assert.deepEqual(statusLineReport({ healthy: false }), { text: 'jev-router ✗ offline', level: 'critical' });
+    assert.equal(statusLineReport({ healthy: true, today: { cheap: 3, total: 9 } }).level, 'ok');
+    assert.equal(statusLineReport({ healthy: true, context: 199_999 }).level, 'ok');
+    assert.equal(statusLineReport({ healthy: true, quota: { utilization: 0.79, window: '5h' } }).level, 'ok');
+    for (const data of [
+      { healthy: true, staleBuild: true },
+      { healthy: true, cheapDown: true },
+      { healthy: true, context: 200_000 },
+      { healthy: true, quota: { utilization: 0.8, window: '5h' } },
+      { healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error' } },
+    ] satisfies StatusLineData[]) {
+      assert.equal(statusLineReport(data).level, 'warn', JSON.stringify(data));
+    }
+  });
+
+  it('statusline --json prints one {"text","level"} line', async () => {
+    const envFile = join(mkdtempSync(join(tmpdir(), 'jev-statusline-cli-')), 'empty.env');
+    writeFileSync(envFile, '', 'utf8');
+    const run = (port: string) =>
+      new Promise<string>((done) => {
+        const { STATUSLINE_QUOTA: _, ...env } = process.env;
+        const proc = spawn(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'statusline', '--json', '--env', envFile], {
+          env: { ...env, HOST: '127.0.0.1', PORT: port, TELEMETRY_DB_PATH: dbPath },
+        });
+        let stdout = '';
+        proc.stdout.on('data', (c) => (stdout += c));
+        proc.on('close', () => done(stdout));
+        proc.stdin.end(JSON.stringify({ session_id: 'sess-1' }));
+      });
+    const port = String((health.address() as AddressInfo).port);
+    assert.equal(await run(port), `${JSON.stringify({ text: 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap', level: 'ok' })}\n`);
+    assert.equal(await run('1'), `${JSON.stringify({ text: 'jev-router ✗ offline', level: 'critical' })}\n`);
   });
 
   it('reads the session id from the JSON Claude Code pipes in, and gives up on silence', async () => {

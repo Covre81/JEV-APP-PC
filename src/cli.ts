@@ -22,6 +22,7 @@ Options:
   --db <file>      stats: telemetry database (default: TELEMETRY_DB_PATH or ~/.jev-router/telemetry.db)
   --since <span>   stats: only the last <n>h / <n>d / <n>m (e.g. 24h, 7d)
   --json           stats: machine-readable output
+                   statusline: {"text","level"}, level ok | warn | critical
 
 Variables already set in the shell win over the env file.`;
 
@@ -139,13 +140,14 @@ async function main(argv: string[]): Promise<number> {
       return -1;
     }
     case 'statusline': {
-      const [{ readSessionId, statusLine }, { readBuildInfo }] = await Promise.all([
+      const [{ readSessionId, statusLineData }, { renderStatusLine, statusLineReport }, { readBuildInfo }] = await Promise.all([
         import('./statusline.js'),
+        import('./telemetry/statusline.js'),
         import('./build-info.js'),
       ]);
       const sessionId = await readSessionId();
       const localBuild = readBuildInfo();
-      const line = await statusLine({
+      const data = await statusLineData({
         ...(localBuild ? { localBuild } : {}),
         dbPath: values.db ?? process.env['TELEMETRY_DB_PATH'] ?? defaultTelemetryDbPath(),
         healthUrl: `http://${process.env['HOST'] || '127.0.0.1'}:${process.env['PORT'] || '8787'}/healthz`,
@@ -153,6 +155,7 @@ async function main(argv: string[]): Promise<number> {
         // Opt-in: Claude Code's own status line already shows the plan's 5h/7d usage.
         ...(process.env['STATUSLINE_QUOTA'] === '1' ? { showQuota: true } : {}),
       });
+      const line = values.json ? JSON.stringify(statusLineReport(data)) : renderStatusLine(data);
       // Exit once written: a stdin that never closed must not keep the status line hanging.
       process.stdout.write(`${line}\n`, () => process.exit(0));
       return -1;
