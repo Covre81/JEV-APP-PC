@@ -314,9 +314,12 @@ cut them all. `jev-router serve` now runs as a **supervisor**: it owns
 and pipes every request to it (unbuffered, so SSE streams flow as written).
 
 ```bash
-npm run build
-jev-router reload          # or: node dist/cli.js reload --env .env
+npm run build              # runs `reload` itself via the `postbuild` hook
+jev-router reload          # manual, e.g. after editing .env: node dist/cli.js reload --env .env
 ```
+
+`postbuild` ignores a missing supervisor (router not running, or `npm install`
+triggering `prepare`), so a build never fails because of it.
 
 `reload` asks the supervisor (loopback-only control port, `CONTROL_PORT`,
 default `PORT + 1`) to start a fresh worker from the new `dist/`. Once it

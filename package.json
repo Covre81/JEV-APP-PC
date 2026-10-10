@@ -19,6 +19,7 @@
   "scripts": {
     "dev": "tsx watch src/cli.ts serve",
     "build": "tsc -p tsconfig.build.json && node scripts/write-build-info.mjs",
+    "postbuild": "node dist/cli.js reload --env .env || exit 0",
     "start": "node dist/cli.js serve",
     "stats": "node dist/cli.js stats",
     "typecheck": "tsc --noEmit",
