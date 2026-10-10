@@ -85,9 +85,11 @@ export class JevClassifier implements ComplexityClassifier {
     const usage = JevUsage.safeParse(payload);
     const model = JevModel.safeParse(payload);
     const textOnly = parseJevTextOnly(payload);
+    const riskScores = parseJevRiskScores(payload);
     return {
       ...parseJevAnswer(payload),
-      risk: parseJevRisk(payload),
+      risk: Math.max(...Object.values(riskScores)),
+      riskScores,
       ...(usage.success
         ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
         : {}),
@@ -127,10 +129,15 @@ export function parseJevAnswer(payload: unknown): ComplexityDistribution {
   return toDistribution(p['0'] ?? 0, p['1'] ?? 0, p['2'] ?? 0);
 }
 
+/** Each risk Noul by question id; throws when any is missing. */
+export function parseJevRiskScores(payload: unknown): Record<keyof typeof RISK_QUESTIONS, number> {
+  const answers = JevRisk.parse(payload).answers as Record<string, { noul: number }>;
+  return Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, answers[k]!.noul])) as Record<keyof typeof RISK_QUESTIONS, number>;
+}
+
 /** Highest of the risk Nouls; throws when any is missing. */
 export function parseJevRisk(payload: unknown): number {
-  const answers = JevRisk.parse(payload).answers as Record<string, { noul: number }>;
-  return Math.max(...Object.keys(RISK_QUESTIONS).map((k) => answers[k]!.noul));
+  return Math.max(...Object.values(parseJevRiskScores(payload)));
 }
 
 export function parseJevTextOnly(payload: unknown): number | undefined {

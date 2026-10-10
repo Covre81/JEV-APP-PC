@@ -126,6 +126,8 @@ export function jevDecisionOf(decision: RouteDecision): JevDecision | null {
     tokensOut: d.usage?.outputTokens ?? null,
     risk: d.risk ?? null,
     model: d.model ?? null,
+    riskScores: d.riskScores ?? null,
+    textOnly: d.textOnly ?? null,
   };
 }
 

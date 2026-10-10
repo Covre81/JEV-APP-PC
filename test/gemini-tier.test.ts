@@ -1,5 +1,6 @@
 import { meterAnthropicBody } from '../src/telemetry/usage-meter.js';
-import { jevRequestBody, parseJevTextOnly, parseJevRisk } from '../src/classifier/jev-classifier.js';
+import { jevRequestBody, parseJevTextOnly, parseJevRisk, parseJevRiskScores } from '../src/classifier/jev-classifier.js';
+import { jevDecisionOf } from '../src/telemetry/audit.js';
 import { Router } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
 import { GeminiCliProvider } from '../src/providers/gemini/provider.js';
@@ -81,6 +82,19 @@ describe('Gemini tier unit tests', () => {
         }
       } as any;
       assert.equal(parseJevRisk(payload), 0.1);
+    });
+
+    it('telemetry keeps textOnly and each risk Noul, not just their max', () => {
+      const payload = { answers: { security_sensitive: { noul: 0.1 }, destructive_or_production: { noul: 0.2 }, requires_inspection: { noul: 0.4 } } };
+      const riskScores = parseJevRiskScores(payload);
+      assert.deepEqual(riskScores, { security_sensitive: 0.1, destructive_or_production: 0.2, requires_inspection: 0.4 });
+      const d = jevDecisionOf({
+        route: 'cheap', reason: 'classified', conversationKey: 'k',
+        distribution: { simple: 1, standard: 0, structural: 0, risk: 0.4, riskScores, textOnly: 0.7 },
+      });
+      assert.deepEqual(d?.riskScores, riskScores);
+      assert.equal(d?.textOnly, 0.7);
+      assert.equal(jevDecisionOf({ route: 'cheap', reason: 'classified', conversationKey: 'k', distribution: { simple: 1, standard: 0, structural: 0 } })?.textOnly, null);
     });
   });
 
