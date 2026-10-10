@@ -45,6 +45,8 @@ export interface LastRoute {
   readonly outcome: Outcome;
   /** P(simple) from JEV; undefined when JEV was not asked (sticky turn, auxiliary request). */
   readonly pSimple?: number;
+  /** Model that served the turn, when it is not the one Claude Code asked for (cheap or gemini route). */
+  readonly model?: string;
 }
 
 interface LastRow {
@@ -52,6 +54,8 @@ interface LastRow {
   reason: string;
   outcome: Outcome;
   jev: string | null;
+  model: string | null;
+  requested: string | null;
 }
 
 /**
@@ -63,13 +67,21 @@ export function lastRoute(db: TelemetryDb, sessionId: string | undefined): LastR
   if (!sessionId) return undefined;
   const row = db
     .prepare(
-      `SELECT final_provider AS provider, route_reason AS reason, outcome, jev_decision AS jev
+      `SELECT final_provider AS provider, route_reason AS reason, outcome, jev_decision AS jev,
+              model, requested_model AS requested
        FROM router_logs WHERE substr(session_id, 1, length(@prefix)) = @prefix ORDER BY id DESC LIMIT 1`,
     )
     .get({ prefix: `${sessionId}:` }) as LastRow | undefined;
   if (!row) return undefined;
   const pSimple = row.jev ? (JSON.parse(row.jev) as { pSimple?: number }).pSimple : undefined;
-  return { provider: row.provider, reason: row.reason, outcome: row.outcome, ...(pSimple === undefined ? {} : { pSimple }) };
+  const served = row.model && row.model !== row.requested ? row.model : undefined;
+  return {
+    provider: row.provider,
+    reason: row.reason,
+    outcome: row.outcome,
+    ...(pSimple === undefined ? {} : { pSimple }),
+    ...(served === undefined ? {} : { model: served }),
+  };
 }
 
 /** Context size of the session's latest main-agent request that reported usage. */
@@ -112,7 +124,7 @@ export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, 
   if (last) {
     const where = last.provider === 'openai' ? 'cheap' : last.provider === 'gemini' ? 'gemini' : 'claude';
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
-    parts.push(`last: ${where} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
+    parts.push(`last: ${where}${last.model ? ` ${last.model}` : ''} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
   }
   if (context !== undefined) {
     const k = `ctx ${Math.round(context / 1000)}k`;
