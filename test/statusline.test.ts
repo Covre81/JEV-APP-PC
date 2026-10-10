@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { after, before, describe, it } from 'node:test';
 import { readSessionId, statusLine } from '../src/statusline.js';
@@ -172,6 +173,25 @@ describe('statusline', () => {
     ] satisfies StatusLineData[]) {
       assert.equal(statusLineReport(data).level, 'warn', JSON.stringify(data));
     }
+  });
+
+  it('statusline --json prints one {"text","level"} line', async () => {
+    const envFile = join(mkdtempSync(join(tmpdir(), 'jev-statusline-cli-')), 'empty.env');
+    writeFileSync(envFile, '', 'utf8');
+    const run = (port: string) =>
+      new Promise<string>((done) => {
+        const { STATUSLINE_QUOTA: _, ...env } = process.env;
+        const proc = spawn(process.execPath, ['--import', 'tsx', resolve('src/cli.ts'), 'statusline', '--json', '--env', envFile], {
+          env: { ...env, HOST: '127.0.0.1', PORT: port, TELEMETRY_DB_PATH: dbPath },
+        });
+        let stdout = '';
+        proc.stdout.on('data', (c) => (stdout += c));
+        proc.on('close', () => done(stdout));
+        proc.stdin.end(JSON.stringify({ session_id: 'sess-1' }));
+      });
+    const port = String((health.address() as AddressInfo).port);
+    assert.equal(await run(port), `${JSON.stringify({ text: 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap', level: 'ok' })}\n`);
+    assert.equal(await run('1'), `${JSON.stringify({ text: 'jev-router ✗ offline', level: 'critical' })}\n`);
   });
 
   it('reads the session id from the JSON Claude Code pipes in, and gives up on silence', async () => {
