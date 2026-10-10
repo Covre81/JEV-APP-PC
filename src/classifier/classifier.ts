@@ -9,13 +9,18 @@ export interface ClassificationInput {
   readonly estimatedInputTokens: number;
 }
 
+/** Speculative questions about a turn that must stay on the primary even when it scores simple. */
+export type RiskQuestion = 'security_sensitive' | 'destructive_or_production' | 'requires_inspection';
+
+/** Each risk Noul by question; `risk` is their max. */
+export type RiskScores = Readonly<Record<RiskQuestion, number>>;
+
 /** A distribution plus, when the classifier is a paid API, the tokens that call billed. */
 export type Classification = ComplexityDistribution & {
   readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
   /** P(the turn is security-sensitive or destructive); a high value vetoes the cheap route. */
   readonly risk?: number;
-  /** Each risk Noul by question id; `risk` is their max. */
-  readonly riskScores?: Readonly<Record<string, number>>;
+  readonly riskScores?: RiskScores;
   /** Versioned model that answered (an alias like `jev-latest` resolves to it). */
   readonly model?: string;
   /** P(a written reply alone answers the turn); asked only when the Gemini tier is on. */
