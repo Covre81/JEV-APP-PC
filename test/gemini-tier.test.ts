@@ -1,5 +1,6 @@
 import { meterAnthropicBody } from '../src/telemetry/usage-meter.js';
-import { jevRequestBody, parseJevTextOnly, parseJevRisk, parseJevRiskScores } from '../src/classifier/jev-classifier.js';import { Router } from '../src/routing/router.js';
+import { jevRequestBody, parseJevTextOnly, parseJevRisk, parseJevRiskScores } from '../src/classifier/jev-classifier.js';
+import { Router } from '../src/routing/router.js';
 import { TtlLruStore } from '../src/routing/session-store.js';
 import { GeminiCliProvider } from '../src/providers/gemini/provider.js';
 import { stat } from 'node:fs/promises';
@@ -85,6 +86,8 @@ describe('Gemini tier unit tests', () => {
     it('parseJevRiskScores keeps each risk Noul by question', () => {
       const payload = { answers: { security_sensitive: { noul: 0.1 }, destructive_or_production: { noul: 0.2 }, requires_inspection: { noul: 0.4 } } };
       assert.deepEqual(parseJevRiskScores(payload), { security_sensitive: 0.1, destructive_or_production: 0.2, requires_inspection: 0.4 });
+      // A missing risk answer must fail the call (toward primary), never read as zero risk.
+      assert.throws(() => parseJevRiskScores({ answers: { security_sensitive: { noul: 0.1 }, destructive_or_production: { noul: 0.2 } } }));
     });
   });
 

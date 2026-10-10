@@ -1,3 +1,4 @@
+import type { RiskScores } from '../classifier/classifier.js';
 import type { QuotaSnapshot } from '../quota.js';
 import type { TelemetryDb } from './db.js';
 
@@ -19,8 +20,8 @@ export interface JevDecision {
   readonly risk?: number | null;
   /** Versioned JEV model that scored the turn; absent on older rows. */
   readonly model?: string | null;
-  /** Each risk Noul by question id (`risk` is their max); absent on older rows. */
-  readonly riskScores?: Readonly<Record<string, number>> | null;
+  /** Absent on older rows. */
+  readonly riskScores?: RiskScores | null;
   /** P(text-only answer suffices), the Gemini-tier gate; null when not asked, absent on older rows. */
   readonly textOnly?: number | null;
 }

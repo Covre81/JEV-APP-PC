@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { toDistribution, type ComplexityDistribution } from '../domain/complexity.js';
-import type { Classification, ClassificationInput, ComplexityClassifier } from './classifier.js';
+import type { Classification, ClassificationInput, ComplexityClassifier, RiskQuestion, RiskScores } from './classifier.js';
 import { JevClient } from '../context/jev-client.js';
 
 /**
@@ -40,13 +40,17 @@ export const RISK_QUESTIONS = {
     instructions:
       "The request asks for a verdict or a report about the project's current state (whether things are ok, what changed, what is wrong, where things stand) that can only be given after investigating several files, diffs, git history or logs, and the request itself does not contain those facts (e.g. 'is everything ok here?', 'summarize what changed in the statusline'). A request to make a specific edit, run a named command, or explain code or text included in the request is NOT this.",
   },
-} as const;
+} as const satisfies Record<RiskQuestion, unknown>;
 
 /** Risk answers are a safety gate: required, so a missing one fails the call toward primary. */
+const RiskNoul = z.looseObject({ noul: z.number().min(0).max(1) });
+// Spelled out (not derived from RISK_QUESTIONS) so the parsed answers stay typed; `satisfies` keeps the two in sync.
 const JevRisk = z.looseObject({
-  answers: z.looseObject(
-    Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, z.looseObject({ noul: z.number().min(0).max(1) })])),
-  ),
+  answers: z.looseObject({
+    security_sensitive: RiskNoul,
+    destructive_or_production: RiskNoul,
+    requires_inspection: RiskNoul,
+  } satisfies Record<RiskQuestion, typeof RiskNoul>),
 });
 
 /** The part of the JEV response the adapter depends on. Unknown fields are tolerated. */
@@ -88,7 +92,7 @@ export class JevClassifier implements ComplexityClassifier {
     const riskScores = parseJevRiskScores(payload);
     return {
       ...parseJevAnswer(payload),
-      risk: Math.max(...Object.values(riskScores)),
+      risk: maxRisk(riskScores),
       riskScores,
       ...(usage.success
         ? { usage: { inputTokens: usage.data.usage.input_tokens, outputTokens: usage.data.usage.output_tokens } }
@@ -130,14 +134,20 @@ export function parseJevAnswer(payload: unknown): ComplexityDistribution {
 }
 
 /** Each risk Noul by question id; throws when any is missing. */
-export function parseJevRiskScores(payload: unknown): Record<keyof typeof RISK_QUESTIONS, number> {
-  const answers = JevRisk.parse(payload).answers as Record<string, { noul: number }>;
-  return Object.fromEntries(Object.keys(RISK_QUESTIONS).map((k) => [k, answers[k]!.noul])) as Record<keyof typeof RISK_QUESTIONS, number>;
+export function parseJevRiskScores(payload: unknown): RiskScores {
+  const a = JevRisk.parse(payload).answers;
+  return {
+    security_sensitive: a.security_sensitive.noul,
+    destructive_or_production: a.destructive_or_production.noul,
+    requires_inspection: a.requires_inspection.noul,
+  };
 }
+
+const maxRisk = (scores: RiskScores): number => Math.max(...Object.values(scores));
 
 /** Highest of the risk Nouls; throws when any is missing. */
 export function parseJevRisk(payload: unknown): number {
-  return Math.max(...Object.values(parseJevRiskScores(payload)));
+  return maxRisk(parseJevRiskScores(payload));
 }
 
 export function parseJevTextOnly(payload: unknown): number | undefined {
