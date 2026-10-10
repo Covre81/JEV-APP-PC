@@ -436,6 +436,12 @@ status line runs in each project's directory, and that project's own `.env`
 could set another `PORT`. Adjust the paths to your checkout (or use
 `jev-router statusline` after `npm link`).
 
+A status line that wraps this one and colours it can pass `--json` instead of
+parsing the markers: it prints `{"text":"jev-router ✓ · …","level":"ok"}`,
+where `level` is `critical` when the router is offline, `warn` when the line
+flags anything (`⚠`, `cheap ✗`, a last turn that did not end ok), and `ok`
+otherwise.
+
 ## Telemetry and cost audit
 
 Every `/v1/messages` exchange is written to `~/.jev-router/telemetry.db`

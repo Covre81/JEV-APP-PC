@@ -38,7 +38,12 @@ interface Health {
  * it must answer fast and never fail, so every error degrades to less
  * information instead of an exception.
  */
-export async function statusLine({ dbPath, healthUrl, sessionId, localBuild, showQuota = false }: StatusLineOptions): Promise<string> {
+export async function statusLine(options: StatusLineOptions): Promise<string> {
+  return renderStatusLine(await statusLineData(options));
+}
+
+/** What the line is built from; `statusline --json` reports it with its level (statusLineReport). */
+export async function statusLineData({ dbPath, healthUrl, sessionId, localBuild, showQuota = false }: StatusLineOptions): Promise<StatusLineData> {
   const health = await probeHealth(healthUrl);
   const healthy = health !== undefined;
   let data: StatusLineData = {
@@ -68,7 +73,7 @@ export async function statusLine({ dbPath, healthUrl, sessionId, localBuild, sho
       // A locked or half-migrated database only costs the details.
     }
   }
-  return renderStatusLine(data);
+  return data;
 }
 
 /** The /healthz body when the router answers ok; undefined when it is down. */

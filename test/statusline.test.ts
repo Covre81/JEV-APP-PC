@@ -10,7 +10,7 @@ import { readSessionId, statusLine } from '../src/statusline.js';
 import { openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
 import type { NewRouterLog } from '../src/telemetry/schema.js';
-import { renderStatusLine } from '../src/telemetry/statusline.js';
+import { renderStatusLine, statusLineReport, type StatusLineData } from '../src/telemetry/statusline.js';
 
 const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
   createdAt: new Date(),
@@ -156,6 +156,22 @@ describe('statusline', () => {
   it('warns from exactly 200k context on', () => {
     assert.equal(renderStatusLine({ healthy: true, context: 199_999 }), 'jev-router ✓ · ctx 200k');
     assert.equal(renderStatusLine({ healthy: true, context: 200_000 }), 'jev-router ✓ · ⚠ ctx 200k → /compact or /clear');
+  });
+
+  it('reports a level from the data, so a caller never parses ✗ or ⚠ out of the text', () => {
+    assert.deepEqual(statusLineReport({ healthy: false }), { text: 'jev-router ✗ offline', level: 'critical' });
+    assert.equal(statusLineReport({ healthy: true, today: { cheap: 3, total: 9 } }).level, 'ok');
+    assert.equal(statusLineReport({ healthy: true, context: 199_999 }).level, 'ok');
+    assert.equal(statusLineReport({ healthy: true, quota: { utilization: 0.79, window: '5h' } }).level, 'ok');
+    for (const data of [
+      { healthy: true, staleBuild: true },
+      { healthy: true, cheapDown: true },
+      { healthy: true, context: 200_000 },
+      { healthy: true, quota: { utilization: 0.8, window: '5h' } },
+      { healthy: true, last: { provider: 'openai', reason: 'classified', outcome: 'stream_error' } },
+    ] satisfies StatusLineData[]) {
+      assert.equal(statusLineReport(data).level, 'warn', JSON.stringify(data));
+    }
   });
 
   it('reads the session id from the JSON Claude Code pipes in, and gives up on silence', async () => {

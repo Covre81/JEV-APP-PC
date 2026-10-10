@@ -115,6 +115,28 @@ export function cheapShare(db: TelemetryDb, since: Date): { cheap: number; total
     .get({ since: since.getTime() }) as { cheap: number; total: number };
 }
 
+/** How much the line asks for attention: offline is critical, anything the line flags is a warning. */
+export type StatusLevel = 'ok' | 'warn' | 'critical';
+
+/**
+ * The line plus its level, for `statusline --json`: a status line that colours
+ * by level reads this field instead of parsing ✗ and ⚠ out of the text.
+ */
+export function statusLineReport(data: StatusLineData): { text: string; level: StatusLevel } {
+  return { text: renderStatusLine(data), level: statusLevel(data) };
+}
+
+function statusLevel({ healthy, staleBuild, cheapDown, last, context, quota }: StatusLineData): StatusLevel {
+  if (!healthy) return 'critical';
+  const flagged =
+    staleBuild ||
+    cheapDown ||
+    (last !== undefined && last.outcome !== 'ok') ||
+    (context !== undefined && context >= CONTEXT_WARN_TOKENS) ||
+    (quota !== undefined && quota.utilization >= QUOTA_WARN);
+  return flagged ? 'warn' : 'ok';
+}
+
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
 export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, context, quota }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
