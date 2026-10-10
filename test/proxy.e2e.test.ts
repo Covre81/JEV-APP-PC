@@ -293,6 +293,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
           toolCalls: r.tool_calls,
           inspectionMiss: r.inspection_miss === null ? null : r.inspection_miss === 1,
           quotaUtilization: r.quota_utilization,
+          upstreamFailure: r.upstream_failure,
         }),
       );
       if (rows.length > 0) return rows;
@@ -361,6 +362,7 @@ describe('proxy end-to-end (fake Anthropic + fake OpenAI-compatible upstreams)',
     assert.ok(row, 'an Anthropic outage must show up in stats');
     assert.equal(row.outcome, 'proxy_error');
     assert.equal(row.httpStatus, 502);
+    assert.match(row.upstreamFailure ?? '', /^network: /, 'the cause of the 502 is kept, not just its status');
   });
 
   it('records client_abort when Claude Code hangs up mid-stream', async () => {

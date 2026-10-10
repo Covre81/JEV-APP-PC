@@ -415,7 +415,9 @@ export function buildServer({
   ) {
     const audited = decision && exchange;
     if (result.kind === 'unavailable') {
-      if (audited) auditFailure(telemetry, decision, exchange);
+      // The 502 body reaches the client only; without this the cause is lost (2026-10-10: 79 bare 502s).
+      reply.log.warn({ route: decision?.route, reason: result.reason }, 'upstream unavailable');
+      if (audited) auditFailure(telemetry, decision, exchange, result.reason);
       return reply.code(502).send(anthropicError('api_error', `jev-router: ${result.reason}`));
     }
     if (decision) {

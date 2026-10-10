@@ -185,9 +185,18 @@ export function auditExchange(
   return metered.body;
 }
 
-/** For exchanges that never got an upstream body (jev-router answered 502 itself). */
-export function auditFailure(sink: TelemetrySink, decision: RouteDecision, ctx: ExchangeContext): void {
-  record(sink, decision, ctx, {
+/** Longest upstream failure reason kept: an HTTP error can carry a whole response body. */
+const MAX_FAILURE_CHARS = 200;
+
+/**
+ * For exchanges that never got an upstream body (jev-router answered 502 itself).
+ * `reason` is why the provider was unavailable. On the cheap route the retry path's
+ * own record ("retried: network") wins, being the more precise; on any other route
+ * that record belongs to an earlier, failed-over attempt and would misattribute it.
+ */
+export function auditFailure(sink: TelemetrySink, decision: RouteDecision, ctx: ExchangeContext, reason: string): void {
+  const failure = (decision.route === 'cheap' ? ctx.upstream?.failure : undefined) ?? reason.slice(0, MAX_FAILURE_CHARS);
+  record(sink, decision, { ...ctx, upstream: { ...ctx.upstream, failure } }, {
     status: 502,
     outcome: 'proxy_error',
     latencyMs: Math.round(performance.now() - ctx.startedAt),
