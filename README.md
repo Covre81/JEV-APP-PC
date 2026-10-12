@@ -170,12 +170,14 @@ The router can optionally divert medium-to-hard, text-only turns to Gemini using
 
 ```
 src/
-├── cli.ts                         # `jev-router` binary: serve | reload | stats | statusline | help; env-file loading
+├── cli.ts                         # `jev-router` binary: serve | reload | stats | statusline | context | agent-hook | help; env-file loading
 ├── serve.ts                       # composition root (only file that knows concrete classes)
 ├── supervisor.ts                  # reverse proxy over a forked worker: reload without dropping sessions
 ├── build-info.ts                  # dist/build-info.json (sha + build time) for /healthz and the status line
 ├── quota.ts                       # anthropic-ratelimit-* headers → binding quota window and level
 ├── statusline.ts                  # `jev-router statusline`: health probe + session's last route
+├── agents.ts                      # `jev-router agent-hook`: running-subagent registry under ~/.jev-router/agents
+├── hook-input.ts                  # reads the JSON Claude Code pipes to a status line or hook
 ├── config.ts                      # zod-validated env → typed Config; fails fast at boot
 ├── paths.ts                       # ~/.jev-router (or $JEV_ROUTER_HOME): .env + telemetry.db
 ├── domain/                        # pure, no I/O
@@ -438,6 +440,28 @@ above 200k carried 92% of main-session tokens. Pass `--env` explicitly: the
 status line runs in each project's directory, and that project's own `.env`
 could set another `PORT`. Adjust the paths to your checkout (or use
 `jev-router statusline` after `npm link`).
+
+`🤖 2 ⏳ 1h05` counts the session's running subagents (Agent tool) and how
+long the oldest has run. It needs `jev-router agent-hook` on four hook events
+in the same `settings.json`; without them it never shows:
+
+```json
+{
+  "hooks": {
+    "SessionStart":  [{ "matcher": "", "hooks": [{ "type": "command", "command": "node /path/to/jev-router/dist/cli.js agent-hook --env /path/to/jev-router/.env", "timeout": 5 }] }],
+    "SubagentStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "node /path/to/jev-router/dist/cli.js agent-hook --env /path/to/jev-router/.env", "timeout": 5 }] }],
+    "SubagentStop":  [{ "matcher": "", "hooks": [{ "type": "command", "command": "node /path/to/jev-router/dist/cli.js agent-hook --env /path/to/jev-router/.env", "timeout": 5 }] }],
+    "SessionEnd":    [{ "matcher": "", "hooks": [{ "type": "command", "command": "node /path/to/jev-router/dist/cli.js agent-hook --env /path/to/jev-router/.env", "timeout": 5 }] }]
+  }
+}
+```
+
+SubagentStart writes an empty file `~/.jev-router/agents/<session>/<agent>`
+(its mtime is the start), SubagentStop deletes it, SessionEnd deletes the
+session's folder. A Claude Code that crashes fires neither, so SessionStart
+cleans up: on `resume` it drops the session's agents (they died with the old
+process), and on any start it deletes session folders untouched for 7 days.
+The hook always exits 0, so it can never block a subagent from stopping.
 
 A status line that wraps this one and colours it can pass `--json` instead of
 parsing the markers: it prints `{"text":"jev-router ✓ · …","level":"ok"}`,

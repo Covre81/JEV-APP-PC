@@ -13,8 +13,8 @@ export interface StatusLineData {
   readonly today?: { readonly cheap: number; readonly total: number };
   /** Context of the session's last main-agent request (input + cache), in tokens. */
   readonly context?: number;
-  /** Subagents of the session seen working recently (see activeAgents). */
-  readonly agents?: number;
+  /** Subagents of the session running now (SubagentStart/Stop hooks, see agents.ts) and how long the oldest has run. */
+  readonly agents?: { readonly count: number; readonly longestMs: number };
   /** Binding Claude quota window, as last persisted by the router. */
   readonly quota?: { readonly utilization: number; readonly window: string };
 }
@@ -95,30 +95,6 @@ export function sessionContext(db: TelemetryDb, sessionId: string | undefined): 
   return row?.tokens;
 }
 
-/** A subagent whose last request ended this recently still counts as running. */
-export const AGENT_ACTIVE_MS = 60_000;
-
-/**
- * Subagents of the session whose latest request ended within AGENT_ACTIVE_MS.
- * A row is written when its request ends but stamped with its start, hence
- * created_at + latency_ms.
- *
- * ponytail: recency, not liveness. A subagent stuck in one tool call longer
- * than the window drops out, and a finished one lingers up to the window. Exact
- * counts need Claude Code's SubagentStart/SubagentStop hooks.
- */
-export function activeAgents(db: TelemetryDb, sessionId: string | undefined, now = Date.now()): number {
-  if (!sessionId) return 0;
-  const row = db
-    .prepare(
-      `SELECT count(DISTINCT session_id) AS n FROM router_logs
-       WHERE substr(session_id, 1, length(@prefix)) = @prefix AND session_id <> @main
-         AND created_at + coalesce(latency_ms, 0) >= @since`,
-    )
-    .get({ prefix: `${sessionId}:`, main: `${sessionId}:main`, since: now - AGENT_ACTIVE_MS }) as { n: number };
-  return row.n;
-}
-
 /**
  * Routed turns since `since` and how many of them the cheap provider answered.
  * Counting requests buried the routing in traffic it never decides: auxiliary
@@ -163,6 +139,14 @@ function statusLevel({ healthy, staleBuild, cheapDown, last, context, quota }: S
   return flagged ? 'warn' : 'ok';
 }
 
+/** 45s, 12m, 1h05: short enough for the line, precise enough to spot a stuck agent. */
+export function elapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
+}
+
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
 export function renderStatusLine({ healthy, staleBuild, cheapDown, last, agents, today, context, quota }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
@@ -174,7 +158,7 @@ export function renderStatusLine({ healthy, staleBuild, cheapDown, last, agents,
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
     parts.push(`last: ${where}${last.model ? ` ${last.model}` : ''} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
   }
-  if (agents) parts.push(`⏳ ${agents}`);
+  if (agents) parts.push(`🤖 ${agents.count} ⏳ ${elapsed(agents.longestMs)}`);
   if (context !== undefined) {
     const k = `ctx ${Math.round(context / 1000)}k`;
     parts.push(context >= CONTEXT_WARN_TOKENS ? `⚠ ${k} → /compact or /clear` : k);
