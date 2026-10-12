@@ -11,7 +11,7 @@ import { readSessionId, statusLine } from '../src/statusline.js';
 import { openTelemetryDb } from '../src/telemetry/db.js';
 import { SqliteTelemetry } from '../src/telemetry/recorder.js';
 import type { NewRouterLog } from '../src/telemetry/schema.js';
-import { renderStatusLine, statusLineReport, type StatusLineData } from '../src/telemetry/statusline.js';
+import { activeAgents, renderStatusLine, statusLineReport, type StatusLineData } from '../src/telemetry/statusline.js';
 
 const row = (over: Partial<NewRouterLog>): NewRouterLog => ({
   createdAt: new Date(),
@@ -48,6 +48,7 @@ describe('statusline', () => {
     sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', requestClass: 'main', tokensIn: 412_300 })); // tool-result continuation
     sink.record(row({ sessionId: 'big:main', routeReason: 'sticky', requestClass: 'main', outcome: 'stream_error' })); // no usage: must not hide the warning
     sink.record(row({ sessionId: 'big:agent-1', routeReason: 'sticky', tokensIn: 30_000 }));
+    sink.record(row({ sessionId: 'big:agent-old', routeReason: 'sticky', createdAt: new Date('2020-01-01T00:00:00Z') })); // long finished: not counted
     sink.record(row({ ...turn, sessionId: 'small:main', routeReason: 'sticky', tokensIn: 64_400 }));
     sink.record(row({ sessionId: 'sub:agent-1', requestClass: 'subagent', humanPromptHash: 'h', finalProvider: 'openai', jevDecision: jev(0.92) }));
     sink.record(row({ sessionId: 'nohdr:main', humanPromptHash: 'h', jevDecision: jev(0.4) })); // no hint headers: request class is null
@@ -66,7 +67,7 @@ describe('statusline', () => {
   });
 
   it("shows the session's last route, across its agents, and today's cheap share of routed turns", async () => {
-    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap');
+    assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-1' }), 'jev-router ✓ · last: claude (sticky) · ⏳ 1 · today 3/7 cheap');
     assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'sess-10' }), 'jev-router ✓ · last: cheap (JEV 0.97) · today 3/7 cheap');
   });
 
@@ -85,8 +86,28 @@ describe('statusline', () => {
     assert.equal(await statusLine({ dbPath, healthUrl, sessionId: 'small' }), 'jev-router ✓ · last: claude (sticky) · ctx 64k · today 3/7 cheap');
     assert.equal(
       await statusLine({ dbPath, healthUrl, sessionId: 'big' }),
-      'jev-router ✓ · last: claude (sticky) · ⚠ ctx 412k → /compact or /clear · today 3/7 cheap',
+      'jev-router ✓ · last: claude (sticky) · ⏳ 1 · ⚠ ctx 412k → /compact or /clear · today 3/7 cheap',
     );
+  });
+
+  it('counts a subagent as running while its last request ended within the window', () => {
+    const db = openTelemetryDb(join(mkdtempSync(join(tmpdir(), 'jev-statusline-agents-')), 'telemetry.db'));
+    const now = Date.now();
+    const insert = db.prepare(
+      `INSERT INTO router_logs (created_at, session_id, final_provider, route_reason, outcome, http_status, latency_ms) VALUES (?, ?, 'anthropic', 'sticky', 'ok', 200, ?)`,
+    );
+    insert.run(now - 90_000, 's:a1', 45_000); // started 90s ago, ended 45s ago: running
+    insert.run(now - 70_000, 's:a2', 1_000); // ended 69s ago: done
+    insert.run(now - 1_000, 's:main', 100); // the main agent is not a subagent
+    insert.run(now - 1_000, 'other:a1', 100);
+    try {
+      assert.equal(activeAgents(db, 's', now), 1);
+      assert.equal(activeAgents(db, undefined, now), 0);
+    } finally {
+      db.close();
+    }
+    assert.equal(renderStatusLine({ healthy: true, agents: 2 }), 'jev-router ✓ · ⏳ 2');
+    assert.equal(statusLineReport({ healthy: true, agents: 2 }).level, 'ok');
   });
 
   it('reports the router offline when /healthz does not answer', async () => {
@@ -190,7 +211,7 @@ describe('statusline', () => {
         proc.stdin.end(JSON.stringify({ session_id: 'sess-1' }));
       });
     const port = String((health.address() as AddressInfo).port);
-    assert.equal(await run(port), `${JSON.stringify({ text: 'jev-router ✓ · last: claude (sticky) · today 3/7 cheap', level: 'ok' })}\n`);
+    assert.equal(await run(port), `${JSON.stringify({ text: 'jev-router ✓ · last: claude (sticky) · ⏳ 1 · today 3/7 cheap', level: 'ok' })}\n`);
     assert.equal(await run('1'), `${JSON.stringify({ text: 'jev-router ✗ offline', level: 'critical' })}\n`);
   });
 

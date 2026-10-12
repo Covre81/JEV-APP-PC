@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { isStaleBuild, type BuildInfo } from './build-info.js';
 import { openTelemetryDb } from './telemetry/db.js';
 import {
+  activeAgents,
   cheapShare,
   lastRoute,
   latestQuota,
@@ -59,13 +60,14 @@ export async function statusLineData({ dbPath, healthUrl, sessionId, localBuild,
         midnight.setHours(0, 0, 0, 0);
         const last = lastRoute(db, sessionId);
         const context = sessionContext(db, sessionId);
+        const agents = activeAgents(db, sessionId);
         let quota: ReturnType<typeof latestQuota>;
         try {
           if (showQuota) quota = latestQuota(db);
         } catch {
           // Database not migrated yet (old router still running): no quota to show.
         }
-        data = { ...data, ...(last ? { last } : {}), ...(quota ? { quota } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
+        data = { ...data, ...(last ? { last } : {}), ...(agents ? { agents } : {}), ...(quota ? { quota } : {}), ...(context === undefined ? {} : { context }), today: cheapShare(db, midnight) };
       } finally {
         db.close();
       }
