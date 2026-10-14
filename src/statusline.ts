@@ -1,4 +1,6 @@
 import { existsSync } from 'node:fs';
+import { runningAgents } from './agents.js';
+import { readHookInput } from './hook-input.js';
 import { isStaleBuild, type BuildInfo } from './build-info.js';
 import { openTelemetryDb } from './telemetry/db.js';
 import {
@@ -24,6 +26,8 @@ export interface StatusLineOptions {
    * Claude Code's own status line JSON already carries the plan's 5h/7d usage.
    */
   readonly showQuota?: boolean;
+  /** Running-subagent registry the hooks keep (agents.ts); defaults to ~/.jev-router/agents. */
+  readonly agentsDir?: string;
 }
 
 /** The part of /healthz the status line reads; older routers answer only `{ok:true}`. */
@@ -43,13 +47,15 @@ export async function statusLine(options: StatusLineOptions): Promise<string> {
 }
 
 /** What the line is built from; `statusline --json` reports it with its level (statusLineReport). */
-export async function statusLineData({ dbPath, healthUrl, sessionId, localBuild, showQuota = false }: StatusLineOptions): Promise<StatusLineData> {
+export async function statusLineData({ dbPath, healthUrl, sessionId, localBuild, showQuota = false, agentsDir }: StatusLineOptions): Promise<StatusLineData> {
   const health = await probeHealth(healthUrl);
   const healthy = health !== undefined;
+  const agents = runningAgents(sessionId, agentsDir);
   let data: StatusLineData = {
     healthy,
     ...(isStaleBuild(localBuild, { sha: health?.sha ?? null, builtAt: health?.builtAt ?? null }) ? { staleBuild: true } : {}),
     ...(health?.cheap === 'down' ? { cheapDown: true } : {}),
+    ...(agents ? { agents: { count: agents.count, longestMs: Date.now() - agents.oldestStartMs } } : {}),
   };
   if (healthy && existsSync(dbPath)) {
     try {
@@ -93,17 +99,6 @@ async function probeHealth(url: string): Promise<Health | undefined> {
 
 /** Claude Code pipes the session as JSON on stdin; anything else (a TTY, garbage, silence) means no session. */
 export async function readSessionId(stdin: NodeJS.ReadStream = process.stdin): Promise<string | undefined> {
-  if (stdin.isTTY) return undefined;
-  const read = (async () => {
-    let raw = '';
-    for await (const chunk of stdin) raw += chunk;
-    return raw;
-  })();
-  const timeout = new Promise<string>((resolve) => setTimeout(resolve, STDIN_TIMEOUT_MS, '').unref());
-  try {
-    const id = (JSON.parse(await Promise.race([read, timeout])) as { session_id?: unknown }).session_id;
-    return typeof id === 'string' && id.length > 0 ? id : undefined;
-  } catch {
-    return undefined;
-  }
+  const id = (await readHookInput(stdin, STDIN_TIMEOUT_MS))?.['session_id'];
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
 }

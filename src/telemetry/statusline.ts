@@ -13,6 +13,8 @@ export interface StatusLineData {
   readonly today?: { readonly cheap: number; readonly total: number };
   /** Context of the session's last main-agent request (input + cache), in tokens. */
   readonly context?: number;
+  /** Subagents of the session running now (SubagentStart/Stop hooks, see agents.ts) and how long the oldest has run. */
+  readonly agents?: { readonly count: number; readonly longestMs: number };
   /** Binding Claude quota window, as last persisted by the router. */
   readonly quota?: { readonly utilization: number; readonly window: string };
 }
@@ -137,8 +139,16 @@ function statusLevel({ healthy, staleBuild, cheapDown, last, context, quota }: S
   return flagged ? 'warn' : 'ok';
 }
 
+/** 45s, 12m, 1h05: short enough for the line, precise enough to spot a stuck agent. */
+export function elapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`;
+}
+
 /** One line, plain text: Claude Code prints the first line of stdout under the prompt. */
-export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, context, quota }: StatusLineData): string {
+export function renderStatusLine({ healthy, staleBuild, cheapDown, last, agents, today, context, quota }: StatusLineData): string {
   if (!healthy) return 'jev-router ✗ offline';
   const parts = ['jev-router ✓'];
   if (staleBuild) parts.push('⚠ build velho');
@@ -148,6 +158,7 @@ export function renderStatusLine({ healthy, staleBuild, cheapDown, last, today, 
     const why = last.pSimple !== undefined ? `JEV ${last.pSimple.toFixed(2)}` : last.reason;
     parts.push(`last: ${where}${last.model ? ` ${last.model}` : ''} (${why})${last.outcome === 'ok' ? '' : ` ${last.outcome}`}`);
   }
+  if (agents) parts.push(`🤖 ${agents.count} ⏳ ${elapsed(agents.longestMs)}`);
   if (context !== undefined) {
     const k = `ctx ${Math.round(context / 1000)}k`;
     parts.push(context >= CONTEXT_WARN_TOKENS ? `⚠ ${k} → /compact or /clear` : k);

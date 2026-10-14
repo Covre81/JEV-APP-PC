@@ -15,6 +15,7 @@ Commands:
   stats           Print routing and token-savings statistics from the telemetry database
   statusline       One line for Claude Code's statusLine: router health and this session's last route
   context          Evaluate and inject ai-memory / graphify context for prompts
+  agent-hook       SessionStart/SubagentStart/SubagentStop/SessionEnd hook: tracks running subagents for the status line
   help             Show this message
 
 Options:
@@ -138,6 +139,19 @@ async function main(argv: string[]): Promise<number> {
       process.exitCode = code;
       setTimeout(() => process.exit(code), 250).unref();
       return -1;
+    }
+    case 'agent-hook': {
+      const [{ readHookInput }, { recordAgentEvent }] = await Promise.all([import('./hook-input.js'), import('./agents.js')]);
+      try {
+        // Claude Code gives the hook 5 s (settings.json): a missed SubagentStop would count a dead agent until SessionEnd.
+        const input = await readHookInput(process.stdin, 3_000);
+        if (input) recordAgentEvent(input);
+      } catch {
+        // A hook that fails only costs the ⏳ count, never the session.
+      }
+      // Same reason as context: no process.exit right after stdin closes; force it only if stdin never closed.
+      setTimeout(() => process.exit(0), 250).unref();
+      return 0;
     }
     case 'statusline': {
       const [{ readSessionId, statusLineData }, { renderStatusLine, statusLineReport }, { readBuildInfo }] = await Promise.all([
